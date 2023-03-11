@@ -33,6 +33,9 @@
 #include "libsyscall_intercept_hook_point.h"
 #include "syscall_desc.h"
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <errno.h>
 #include <limits.h>
 #include <stdbool.h>
@@ -43,6 +46,9 @@
 #include <ctype.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/types.h>
+#include <dirent.h>
+#include <assert.h>
 
 #include "fsapi.h"
 
@@ -56,18 +62,35 @@ static size_t buffer_offset;
 #define FS_SHM_KEY_BASE 20190301
 #define FS_MAX_NUM_WORKER 20
 #define NUM_MAX_FSP_FD (10000)
+#define FSP_FD_TYPE_EMPTY (0)
+#define FSP_FD_TYPE_FILE (1)
+#define FSP_FD_TYPE_DIR (2)
+#define FSP_FD_START_VAL 10000
 #define UNUSED(x) (void)(x)
 static const int kMaxNumFds = NUM_MAX_FSP_FD;
 static const int kInvalidFd = -99;
 static int g_fsp_fd_add_idx = 0;
+static bool g_fsp_dbg = false;
 static int fsp_fds[NUM_MAX_FSP_FD];
+static int8_t fsp_fds_type[NUM_MAX_FSP_FD];
+static struct CFS_DIR* fsp_fd_dirs[NUM_MAX_FSP_FD];
+static unsigned int fsp_readdir_done_cnt[NUM_MAX_FSP_FD];
 static const char *fsp_dir_prefix = "FSP";
 // 3 == strlen(fsp_dir_prefix)
 #define TO_NEW_PATH(path) (path + 3)
 
-static const char *FSP_ENV_VAR_KEY_LIST = "FSP_KEY_LISTS";
 static key_t shm_keys[FS_MAX_NUM_WORKER];
 static int g_num_workers = 0;
+
+// https://man7.org/linux/man-pages/man2/getdents.2.html
+// https://elixir.bootlin.com/linux/v4.7/source/fs/readdir.c#L150
+struct linux_dirent {
+           unsigned long  d_ino;
+           unsigned long  d_off;
+           unsigned short d_reclen;
+           char           d_name[256];
+		   unsigned char  d_type;
+};
 
 static void init_shm_keys(char *keys);
 static void clean_exit() {
@@ -78,6 +101,7 @@ static inline int check_if_fsp_path(const char *path) {
 }
 
 static int add_fsp_fd(int new_fd) {
+	assert (new_fd > FSP_FD_START_VAL);
 	int newfd_idx = -1;
 	for (int i_add = 0; i_add < kMaxNumFds; i_add++) {
 		int cur_idx = (g_fsp_fd_add_idx + i_add) % kMaxNumFds;
@@ -89,6 +113,15 @@ static int add_fsp_fd(int new_fd) {
 		}
 	}
 	return newfd_idx;
+}
+
+static int8_t set_fsp_fd_type(int fd, int idx, int8_t cur_type) {
+	if (fsp_fds[idx] != fd) {
+		return -1;
+	}
+	int8_t orig_type = fsp_fds_type[idx];
+	fsp_fds_type[idx] = cur_type;
+	return orig_type;
 }
 
 static int find_fsp_fd(int fd) {
@@ -108,6 +141,8 @@ static int del_fsp_fd(int fd) {
 	int idx = find_fsp_fd(fd);
 	if (idx >= 0) {
 		fsp_fds[idx] = kInvalidFd;
+		fsp_fds_type[idx] = FSP_FD_TYPE_EMPTY;
+		fsp_fd_dirs[idx] = 0;
 	}
 	return idx;
 }
@@ -884,6 +919,53 @@ print_syscall(const struct syscall_desc *desc,
 	append_buffer(local_buffer, c - local_buffer);
 }
 
+static void check_open_flag_fd_type(long open_flags, int8_t *fd_type) {
+	if (open_flags & O_DIRECTORY) {
+		if (g_fsp_dbg) append_buffer("Dir\n", 4);
+		*fd_type = FSP_FD_TYPE_DIR;
+	} else {
+		if (g_fsp_dbg) append_buffer("File\n", 5);
+	}
+}
+
+static int getdents_by_fsp_readdirs(int fd, struct linux_dirent *dirp, unsigned int count) {
+	struct dirent *dent_p;
+	assert (count > 0);
+	int fd_idx = find_fsp_fd(fd);
+	struct CFS_DIR* fsp_dirp = fsp_fd_dirs[fd_idx];
+	struct linux_dirent *cur_linux_dirp = dirp;
+	unsigned int done_count = 0;
+	do {
+		dent_p = fs_readdir(fsp_dirp);
+		if (dent_p != NULL) {
+			cur_linux_dirp = dirp + done_count;
+			cur_linux_dirp->d_ino = (ino_t)dent_p->d_ino;
+			cur_linux_dirp->d_off = (off_t)(fsp_readdir_done_cnt[fd_idx]) + done_count + 1;
+			cur_linux_dirp->d_type = (unsigned char)dent_p->d_type;
+			cur_linux_dirp->d_reclen = sizeof(struct linux_dirent);
+			memcpy(cur_linux_dirp->d_name, dent_p->d_name, 256);
+			done_count++;
+			if (done_count == count) {
+				break;
+			}
+		}
+	} while (dent_p != NULL);
+	fsp_readdir_done_cnt[fd_idx] += done_count;
+	return done_count;
+}
+
+static int dir_fd_do_opendir(const char* path, int dir_fd_idx, int dir_fd) {
+	assert (fsp_fds[dir_fd_idx] == dir_fd);
+	assert(fsp_fd_dirs[dir_fd_idx] == 0);
+	struct CFS_DIR* dirp = fs_opendir(path);
+	if (dirp == NULL) {
+		return -1;
+	}
+	fsp_fd_dirs[dir_fd_idx] = dirp;
+	fsp_readdir_done_cnt[dir_fd_idx] = 0;
+	return 0;
+}
+
 static bool fsp_syscall_handle(long syscall_number,
 		const long args[6],
 		long *result)
@@ -898,99 +980,142 @@ static bool fsp_syscall_handle(long syscall_number,
 
 	bool handled = false;
 	char *cur_path = (char*)args[0];
+	int8_t cur_fd_type = FSP_FD_TYPE_FILE;
 	
 	// Path-based operations
-	if (syscall_number == SYS_open) {
-		if (check_if_fsp_path(cur_path)) {
-			cur_path = TO_NEW_PATH(cur_path);
-			DO_ORIG_PATH_SYSCALL;
-			int fd = (int)(*result);
-			if (fd >= 0) {
-				add_fsp_fd(fd);
-			}
-		} else {
-			DO_ORIG_PATH_SYSCALL;
+	if (syscall_number == SYS_open || syscall_number == SYS_openat) {
+		int open_flag_pos = 1;
+		int open_mode_pos = 2;
+		if (syscall_number == SYS_openat) {
+			cur_path = (char*)args[1];
+			open_flag_pos = 2;
+			open_mode_pos = 3;
 		}
-	}
-	if (syscall_number == SYS_openat) {
-		cur_path = (char*)args[1];
+		check_open_flag_fd_type(args[open_flag_pos], &cur_fd_type);
 		if (check_if_fsp_path(cur_path)) {
 			cur_path = TO_NEW_PATH(cur_path);
-			DO_ORIG_PATH_SYSCALL1;
-			int fd = (int)(*result);
+			int fd = fd = fs_open(cur_path, (int)args[open_flag_pos], (mode_t)args[open_mode_pos]);
 			if (fd >= 0) {
-				add_fsp_fd(fd);
+				int idx = add_fsp_fd(fd);
+				set_fsp_fd_type(fd, idx, cur_fd_type);
+				if (cur_fd_type == FSP_FD_TYPE_DIR) {
+					dir_fd_do_opendir(cur_path, fd, idx);
+				}
 			}
+			*result = fd;
+			handled = true;
 		} else {
-			DO_ORIG_PATH_SYSCALL1;
+			DO_ORIG_PATH_SYSCALL;
 		}
 	}
 	if (syscall_number == SYS_unlink) {
 		if (check_if_fsp_path(cur_path)) {
 			cur_path = TO_NEW_PATH(cur_path);
+			int ret = fs_unlink(cur_path);
+			*result = ret;
+			handled = true;
+		} else {
+			DO_ORIG_PATH_SYSCALL;
 		}
-		DO_ORIG_PATH_SYSCALL;
 	}
 	if (syscall_number == SYS_mkdir) {
 		if (check_if_fsp_path(cur_path)) {
 			cur_path = TO_NEW_PATH(cur_path);
+			int ret = fs_mkdir(cur_path, args[1]);
+			*result = ret;
+			handled = true;
+		} else {
+			DO_ORIG_PATH_SYSCALL;
 		}
-		DO_ORIG_PATH_SYSCALL;
 	}
 	if (syscall_number == SYS_rename) {
 		char *dst_path = (char*)args[1];
 		if (check_if_fsp_path(cur_path)) {
 			if (check_if_fsp_path(dst_path)) {
 				cur_path = TO_NEW_PATH(cur_path);
+				dst_path = TO_NEW_PATH(dst_path);
+				int ret = fs_rename(cur_path, dst_path);
+				*result = ret;
+				handled = true;
 			} else {
-				// TODO: shall return error or warn here
+				*result = -1;
+				handled = true;
 			}
+		} else {
+			*result = syscall_no_intercept(syscall_number, cur_path, dst_path,
+				args[2], args[3], args[4], args[5]);
+			handled = true;
 		}
-		*result = syscall_no_intercept(syscall_number, cur_path, dst_path, 
-			args[2], args[3], args[4], args[5]);
-		handled = true;
 	}
 	if (syscall_number == SYS_lstat) {
 		if (check_if_fsp_path(cur_path)) {
 			cur_path = TO_NEW_PATH(cur_path);
+			int ret = fs_stat(cur_path, (struct stat *)args[1]);
+			*result = ret;
+		} else {
+			DO_ORIG_PATH_SYSCALL;
 		}
-		DO_ORIG_PATH_SYSCALL;
 	}
 	// Fd-based operations
 	int cur_fd = (int)args[0];
 	char local_fd_log_buf[100];
+	UNUSED(local_fd_log_buf);
 #define DO_ORIG_FD_SYSCALL *result = \
 	syscall_no_intercept(syscall_number, cur_fd, args[1], args[2], args[3], args[4], args[5]); \
 	handled = true;
-#define DO_LOOKUP_FD if (find_fsp_fd(cur_fd)) { \
+#define DO_LOOKUP_FD if (is_fsp_fd(cur_fd)) { \
 	sprintf(local_fd_log_buf, "fsp_fd(%d)\n", cur_fd); \
 	append_buffer(local_fd_log_buf, strlen(local_fd_log_buf)); }
 	if (syscall_number == SYS_getdents64 || syscall_number == SYS_getdents) {
-		DO_LOOKUP_FD;
-		DO_ORIG_FD_SYSCALL;
+		if (is_fsp_fd(cur_fd)) {
+			*result = getdents_by_fsp_readdirs(cur_fd, (struct linux_dirent*)args[1], args[2]);
+			handled = true;
+		} else {
+			DO_ORIG_FD_SYSCALL;
+		}
 	}
 	if (syscall_number == SYS_fadvise64) {
-		DO_LOOKUP_FD;
-		DO_ORIG_FD_SYSCALL;
+		if (is_fsp_fd(cur_fd)) {
+			// directly return success if the fd is from FSP
+			*result = 0;
+			handled = true;
+		} else {
+			DO_ORIG_FD_SYSCALL;
+		}
 	}
 	if (syscall_number == SYS_read) {
-		DO_LOOKUP_FD;
-		DO_ORIG_FD_SYSCALL;
+		if (is_fsp_fd(cur_fd)) {
+			*result = fs_allocated_read(cur_fd, (void*)args[1], args[2]);
+			handled = true;
+		} else {
+			DO_ORIG_FD_SYSCALL;
+		}
 	}
 	if (syscall_number == SYS_write) {
-		DO_LOOKUP_FD;
-		DO_ORIG_FD_SYSCALL;
+		if (is_fsp_fd(cur_fd)) {
+			*result = fs_allocated_write(cur_fd, (void*)args[1], args[2]);
+			handled = true;
+		} else {
+			DO_ORIG_FD_SYSCALL;
+		}
 	}
 	if (syscall_number == SYS_close) {
 		int idx = del_fsp_fd(cur_fd);
 		if (idx >= 0) {
-			append_buffer("fsp_close\n", 10);
+			if (g_fsp_dbg) {
+				append_buffer("fsp_close\n", 10);
+			}
+		} else {
+			DO_ORIG_FD_SYSCALL;
 		}
-		DO_ORIG_FD_SYSCALL;
 	}
 	if (syscall_number == SYS_fstat || syscall_number == SYS_newfstatat) {
-		DO_LOOKUP_FD;
-		DO_ORIG_FD_SYSCALL;
+		if (is_fsp_fd(cur_fd)) {
+			*result = fs_fstat(cur_fd, (struct stat *)args[1]);
+			handled = true;
+		} else {
+			DO_ORIG_FD_SYSCALL;
+		}
 	}
 
 #undef DO_ORIG_PATH_SYSCALL
@@ -1057,7 +1182,7 @@ start(void)
 		syscall_no_intercept(SYS_exit_group, 4);
 
 	// fsp init
-	char *fsp_num_workers_str = getenv(FSP_ENV_VAR_KEY_LIST);
+	char *fsp_num_workers_str = getenv("FSP_KEY_LISTS");
 	if (fsp_num_workers_str == NULL) {
 		syscall_no_intercept(SYS_exit_group, 3);
 	}
@@ -1065,6 +1190,11 @@ start(void)
 	int rt = fs_init_multi(g_num_workers, shm_keys);
 	if (rt < 0) {
 		syscall_no_intercept(SYS_exit_group, 3);
+	}
+
+	char *fsp_intercept_dbg = getenv("FSP_INTERCEPT_DBG");
+	if (fsp_intercept_dbg == NULL) {
+		g_fsp_dbg = (fsp_intercept_dbg[0] == 'T');
 	}
 
 	volatile void *ptr = fs_malloc(1024);
