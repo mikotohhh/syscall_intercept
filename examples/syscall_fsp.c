@@ -89,7 +89,7 @@ struct linux_dirent {
            unsigned long  d_off;
            unsigned short d_reclen;
            char           d_name[256];
-		   unsigned char  d_type;
+           unsigned char  d_type;
 };
 
 static void init_shm_keys(char *keys);
@@ -1100,10 +1100,14 @@ static bool fsp_syscall_handle(long syscall_number,
 		}
 	}
 	if (syscall_number == SYS_close) {
-		int idx = del_fsp_fd(cur_fd);
-		if (idx >= 0) {
-			if (g_fsp_dbg) {
-				append_buffer("fsp_close\n", 10);
+		if (is_fsp_fd(cur_fd)) {
+			*result = fs_close(cur_fd);
+			handled = true;
+			int idx = del_fsp_fd(cur_fd);
+			if (idx >= 0) {
+				if (g_fsp_dbg) {
+					append_buffer("fsp_close\n", 10);
+				}
 			}
 		} else {
 			DO_ORIG_FD_SYSCALL;
