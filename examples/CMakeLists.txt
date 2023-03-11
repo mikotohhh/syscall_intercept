@@ -43,6 +43,22 @@ target_link_libraries(syscall_logger PRIVATE syscall_intercept_shared)
 add_library(syscall_play SHARED syscall_play.c syscall_desc.c)
 target_link_libraries(syscall_play PRIVATE syscall_intercept_shared)
 
-add_library(syscall_fsp SHARED syscall_fsp.c syscall_desc.c)
-target_link_libraries(syscall_fsp PRIVATE syscall_intercept_shared)
+# FSP
+set(CFS_ROOT_DIR "$ENV{CFS_ROOT_DIR}/cfs")
+message("CFS_ROOT_DIR:${CFS_ROOT_DIR}")
+set(CFS_INC "${CFS_ROOT_DIR}/include")
+set(CFS_BUILD "${CFS_ROOT_DIR}/build")
 
+include_directories(${CFS_INC})
+message("CFS_INC:${CFS_INC}")
+link_directories(${CFS_BUILD})
+
+find_package(gflags REQUIRED)
+set(GFLAGS_INCLUDE_DIR /usr/lib/x86_64-linux-gnu)
+include_directories(${gflags_INCLUDE_DIR})
+
+link_directories("${CFS_ROOT_DIR}/lib/tbb/build/tbb_build_release")
+
+add_library(syscall_fsp SHARED syscall_fsp.c syscall_desc.c)
+target_link_libraries(syscall_fsp PRIVATE syscall_intercept_shared
+	dl cfs rt stdc++ tbb tbbmalloc iberty)

@@ -44,6 +44,8 @@
 #include <string.h>
 #include <stdio.h>
 
+#include "fsapi.h"
+
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
 int log_fd;
@@ -1032,6 +1034,7 @@ start(void)
 	if (log_fd < 0)
 		syscall_no_intercept(SYS_exit_group, 4);
 
+	fs_register();
 	init_fsp_fd_array();
 
 	intercept_hook_point = &hook;
