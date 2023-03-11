@@ -33,6 +33,10 @@
 #ifndef SYSCALL_INTERCEPT_EXAMPLE_LOGGING_H
 #define SYSCALL_INTERCEPT_EXAMPLE_LOGGING_H
 
+#ifdef __cpluscplus
+extern "C" {
+#endif
+
 enum arg_type {
 	arg_none,
 	arg_fd,
@@ -58,6 +62,10 @@ struct syscall_desc {
 };
 
 const struct syscall_desc *get_syscall_desc(long syscall_number,
-					const long args[static 6]);
+					const long args[6]);
+
+#ifdef __cpluscplus
+} // extern "C"
+#endif
 
 #endif
