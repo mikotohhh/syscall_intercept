@@ -43,3 +43,6 @@ target_link_libraries(syscall_logger PRIVATE syscall_intercept_shared)
 add_library(syscall_play SHARED syscall_play.c syscall_desc.c)
 target_link_libraries(syscall_play PRIVATE syscall_intercept_shared)
 
+add_library(syscall_fsp SHARED syscall_fsp.c syscall_desc.c)
+target_link_libraries(syscall_fsp PRIVATE syscall_intercept_shared)
+
