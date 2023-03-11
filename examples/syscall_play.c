@@ -877,50 +877,50 @@ static bool fsp_syscall_handle(long syscall_number,
 		const long args[6],
 		long *result)
 {
-#define DO_ORIG_SYSCALL *result = \
-	syscall_no_intercept(args[0], cur_path, args[2], args[3], args[4], args[5]);
+#define DO_ORIG_PATH_SYSCALL *result = \
+	syscall_no_intercept(syscall_number, cur_path, args[1], args[2], args[3], args[4], args[5]);
 
-#define DO_ORIG_SYSCALL_PATH2 *result = \
-	syscall_no_intercept(args[0], args[1], cur_path, args[3], args[4], args[5]);
+#define DO_ORIG_PATH_SYSCALL1 *result = \
+	syscall_no_intercept(syscall_number, args[0], cur_path, args[2], args[3], args[4], args[5]);
 
 	bool handled = false;
-	char *cur_path = (char*)args[1];
+	char *cur_path = (char*)args[0];
 	
 	// Path-based operations
 	if (syscall_number == SYS_open) {
 		if (check_if_fsp_path(cur_path)) {
 			cur_path = TO_NEW_PATH(cur_path);
 			handled = true;
-			DO_ORIG_SYSCALL;
+			DO_ORIG_PATH_SYSCALL;
 			int fd = (int)(*result);
 			if (fd >= 0) {
 				add_fsp_fd(fd);
 			}
 		} else {
-			DO_ORIG_SYSCALL;
+			DO_ORIG_PATH_SYSCALL;
 		}
 	}
 	if (syscall_number == SYS_openat) {
-		cur_path = (char*)args[2];
+		cur_path = (char*)args[1];
 		if (check_if_fsp_path(cur_path)) {
 			cur_path = TO_NEW_PATH(cur_path);
 		}
-		DO_ORIG_SYSCALL_PATH2;
+		DO_ORIG_PATH_SYSCALL1;
 	}
 	if (syscall_number == SYS_unlink) {
 		if (check_if_fsp_path(cur_path)) {
 			cur_path = TO_NEW_PATH(cur_path);
 		}
-		DO_ORIG_SYSCALL;
+		DO_ORIG_PATH_SYSCALL;
 	}
 	if (syscall_number == SYS_mkdir) {
 		if (check_if_fsp_path(cur_path)) {
 			cur_path = TO_NEW_PATH(cur_path);
 		}
-		DO_ORIG_SYSCALL;
+		DO_ORIG_PATH_SYSCALL;
 	}
 	if (syscall_number == SYS_rename) {
-		char *dst_path = (char*)args[2];
+		char *dst_path = (char*)args[1];
 		if (check_if_fsp_path(cur_path)) {
 			if (check_if_fsp_path(dst_path)) {
 				cur_path = TO_NEW_PATH(cur_path);
@@ -928,49 +928,52 @@ static bool fsp_syscall_handle(long syscall_number,
 				// TODO: shall return error or warn here
 			}
 		}
-		*result = syscall_no_intercept(args[0], cur_path, dst_path, args[3], 
-			args[4], args[5]);
+		*result = syscall_no_intercept(syscall_number, cur_path, dst_path, 
+			args[2], args[3], args[4], args[5]);
 	}
 	if (syscall_number == SYS_lstat) {
 		if (check_if_fsp_path(cur_path)) {
 			cur_path = TO_NEW_PATH(cur_path);
 		}
-		DO_ORIG_SYSCALL;
+		DO_ORIG_PATH_SYSCALL;
 	}
 	// Fd-based operations
-	int cur_fd = (int)args[1];
+	int cur_fd = (int)args[0];
+#define DO_ORIG_FD_SYSCALL *result = \
+	syscall_no_intercept(syscall_number, cur_fd, args[1], args[2], args[3], args[4], args[5]);
 #define DO_LOOKUP_FD if (find_fsp_fd(cur_fd)) \
-	append_buffer("fsp_fd", 7);
+	append_buffer("fsp_fd\n", 8);
 	if (syscall_number == SYS_getdents64 || syscall_number == SYS_getdents) {
 		DO_LOOKUP_FD;
-		DO_ORIG_SYSCALL;
+		DO_ORIG_FD_SYSCALL;
 	}
 	if (syscall_number == SYS_fadvise64) {
 		DO_LOOKUP_FD;
-		DO_ORIG_SYSCALL;
+		DO_ORIG_FD_SYSCALL;
 	}
 	if (syscall_number == SYS_read) {
 		DO_LOOKUP_FD;
-		DO_ORIG_SYSCALL;
+		DO_ORIG_FD_SYSCALL;
 	}
 	if (syscall_number == SYS_write) {
 		DO_LOOKUP_FD;
-		DO_ORIG_SYSCALL;
+		DO_ORIG_FD_SYSCALL;
 	}
 	if (syscall_number == SYS_close) {
 		int idx = del_fsp_fd(cur_fd);
 		if (idx >= 0) {
 			append_buffer("fsp_close\n", 10);
 		}
-		DO_ORIG_SYSCALL;
+		DO_ORIG_FD_SYSCALL;
 	}
 	if (syscall_number == SYS_fstat) {
 		DO_LOOKUP_FD;
-		DO_ORIG_SYSCALL;
+		DO_ORIG_FD_SYSCALL;
 	}
 
-#undef DO_ORIG_SYSCALL
-#undef DO_ORIG_SYSCALL_PATH2
+#undef DO_ORIG_PATH_SYSCALL
+#undef DO_ORIG_PATH_SYSCALL1
+#undef DO_ORIG_FD_SYSCALL
 #undef DO_LOOKUP_FD
 	return handled;
 }
