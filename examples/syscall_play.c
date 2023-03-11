@@ -939,13 +939,23 @@ static bool fsp_syscall_handle(long syscall_number,
 	}
 	// Fd-based operations
 	int cur_fd = (int)args[1];
+#define DO_LOOKUP_FD if (find_fsp_fd(cur_fd)) \
+	append_buffer("fsp_fd", 7);
 	if (syscall_number == SYS_getdents64 || syscall_number == SYS_getdents) {
+		DO_LOOKUP_FD;
+		DO_ORIG_SYSCALL;
 	}
 	if (syscall_number == SYS_fadvise64) {
+		DO_LOOKUP_FD;
+		DO_ORIG_SYSCALL;
 	}
 	if (syscall_number == SYS_read) {
+		DO_LOOKUP_FD;
+		DO_ORIG_SYSCALL;
 	}
 	if (syscall_number == SYS_write) {
+		DO_LOOKUP_FD;
+		DO_ORIG_SYSCALL;
 	}
 	if (syscall_number == SYS_close) {
 		int idx = del_fsp_fd(cur_fd);
@@ -955,10 +965,13 @@ static bool fsp_syscall_handle(long syscall_number,
 		DO_ORIG_SYSCALL;
 	}
 	if (syscall_number == SYS_fstat) {
+		DO_LOOKUP_FD;
+		DO_ORIG_SYSCALL;
 	}
 
 #undef DO_ORIG_SYSCALL
 #undef DO_ORIG_SYSCALL_PATH2
+#undef DO_LOOKUP_FD
 	return handled;
 }
 
