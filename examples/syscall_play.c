@@ -42,6 +42,7 @@
 #include <fcntl.h>
 #include <ctype.h>
 #include <string.h>
+#include <stdio.h>
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
@@ -872,16 +873,17 @@ print_syscall(const struct syscall_desc *desc,
 	append_buffer(local_buffer, c - local_buffer);
 }
 
-
 static bool fsp_syscall_handle(long syscall_number,
 		const long args[6],
 		long *result)
 {
 #define DO_ORIG_PATH_SYSCALL *result = \
-	syscall_no_intercept(syscall_number, cur_path, args[1], args[2], args[3], args[4], args[5]);
+	syscall_no_intercept(syscall_number, cur_path, args[1], args[2], args[3], args[4], args[5]); \
+	handled = true;
 
 #define DO_ORIG_PATH_SYSCALL1 *result = \
-	syscall_no_intercept(syscall_number, args[0], cur_path, args[2], args[3], args[4], args[5]);
+	syscall_no_intercept(syscall_number, args[0], cur_path, args[2], args[3], args[4], args[5]); \
+	handled = true;
 
 	bool handled = false;
 	char *cur_path = (char*)args[0];
@@ -890,7 +892,6 @@ static bool fsp_syscall_handle(long syscall_number,
 	if (syscall_number == SYS_open) {
 		if (check_if_fsp_path(cur_path)) {
 			cur_path = TO_NEW_PATH(cur_path);
-			handled = true;
 			DO_ORIG_PATH_SYSCALL;
 			int fd = (int)(*result);
 			if (fd >= 0) {
@@ -904,8 +905,14 @@ static bool fsp_syscall_handle(long syscall_number,
 		cur_path = (char*)args[1];
 		if (check_if_fsp_path(cur_path)) {
 			cur_path = TO_NEW_PATH(cur_path);
+			DO_ORIG_PATH_SYSCALL1;
+			int fd = (int)(*result);
+			if (fd >= 0) {
+				add_fsp_fd(fd);
+			}
+		} else {
+			DO_ORIG_PATH_SYSCALL1;
 		}
-		DO_ORIG_PATH_SYSCALL1;
 	}
 	if (syscall_number == SYS_unlink) {
 		if (check_if_fsp_path(cur_path)) {
@@ -930,6 +937,7 @@ static bool fsp_syscall_handle(long syscall_number,
 		}
 		*result = syscall_no_intercept(syscall_number, cur_path, dst_path, 
 			args[2], args[3], args[4], args[5]);
+		handled = true;
 	}
 	if (syscall_number == SYS_lstat) {
 		if (check_if_fsp_path(cur_path)) {
@@ -939,10 +947,13 @@ static bool fsp_syscall_handle(long syscall_number,
 	}
 	// Fd-based operations
 	int cur_fd = (int)args[0];
+	char local_fd_log_buf[100];
 #define DO_ORIG_FD_SYSCALL *result = \
-	syscall_no_intercept(syscall_number, cur_fd, args[1], args[2], args[3], args[4], args[5]);
-#define DO_LOOKUP_FD if (find_fsp_fd(cur_fd)) \
-	append_buffer("fsp_fd\n", 8);
+	syscall_no_intercept(syscall_number, cur_fd, args[1], args[2], args[3], args[4], args[5]); \
+	handled = true;
+#define DO_LOOKUP_FD if (find_fsp_fd(cur_fd)) { \
+	sprintf(local_fd_log_buf, "fsp_fd(%d)\n", cur_fd); \
+	append_buffer(local_fd_log_buf, strlen(local_fd_log_buf)); }
 	if (syscall_number == SYS_getdents64 || syscall_number == SYS_getdents) {
 		DO_LOOKUP_FD;
 		DO_ORIG_FD_SYSCALL;
@@ -966,7 +977,7 @@ static bool fsp_syscall_handle(long syscall_number,
 		}
 		DO_ORIG_FD_SYSCALL;
 	}
-	if (syscall_number == SYS_fstat) {
+	if (syscall_number == SYS_fstat || syscall_number == SYS_newfstatat) {
 		DO_LOOKUP_FD;
 		DO_ORIG_FD_SYSCALL;
 	}
