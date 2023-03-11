@@ -43,6 +43,9 @@
 #include <ctype.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
@@ -885,8 +888,18 @@ static bool fsp_syscall_handle(long syscall_number,
 	syscall_no_intercept(syscall_number, args[0], cur_path, args[2], args[3], args[4], args[5]); \
 	handled = true;
 
+#define FSP_LOCAL_LOG_SZ 256
+#define FSP_APPEND_TO_LOG(...)   \
+  do {                            \
+	memset(local_log_buf, 0, FSP_LOCAL_LOG_SZ); \
+	sprintf(local_log_buf, __VA_ARGS__); \
+	append_buffer(local_log_buf, strlen(local_log_buf)); \
+  } while (0);
+
 	bool handled = false;
 	char *cur_path = (char*)args[0];
+	char local_log_buf[FSP_LOCAL_LOG_SZ];
+	UNUSED(local_log_buf);
 	
 	// Path-based operations
 	if (syscall_number == SYS_open) {
@@ -925,6 +938,7 @@ static bool fsp_syscall_handle(long syscall_number,
 			cur_path = TO_NEW_PATH(cur_path);
 		}
 		DO_ORIG_PATH_SYSCALL;
+		FSP_APPEND_TO_LOG("mkdir:%s mode:%ld\n", cur_path, args[1]);
 	}
 	if (syscall_number == SYS_rename) {
 		char *dst_path = (char*)args[1];
@@ -944,6 +958,8 @@ static bool fsp_syscall_handle(long syscall_number,
 			cur_path = TO_NEW_PATH(cur_path);
 		}
 		DO_ORIG_PATH_SYSCALL;
+		struct stat *stat_buf = (struct stat*)args[1];
+		FSP_APPEND_TO_LOG("fsp_lstat:%s ret:%ld uid:%d gid:%d mode:%d\n", cur_path, *result, stat_buf->st_uid, stat_buf->st_gid, stat_buf->st_mode);
 	}
 	// Fd-based operations
 	int cur_fd = (int)args[0];
@@ -1021,7 +1037,7 @@ hook(long syscall_number,
 static __attribute__((constructor)) void
 start(void)
 {
-	const char *path = getenv("SYSCALL_LOG_PATH");
+	const char *path = getenv("SYSCALL_PLAY_LOG_PATH");
 
 	if (path == NULL)
 		syscall_no_intercept(SYS_exit_group, 3);
