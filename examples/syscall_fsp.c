@@ -53,6 +53,8 @@ int log_fd;
 static char buffer[0x20000];
 static size_t buffer_offset;
 
+#define FS_SHM_KEY_BASE 20190301
+#define FS_MAX_NUM_WORKER 20
 #define NUM_MAX_FSP_FD (10000)
 #define UNUSED(x) (void)(x)
 static const int kMaxNumFds = NUM_MAX_FSP_FD;
@@ -63,7 +65,14 @@ static const char *fsp_dir_prefix = "FSP";
 // 3 == strlen(fsp_dir_prefix)
 #define TO_NEW_PATH(path) (path + 3)
 
+static const char *FSP_ENV_VAR_KEY_LIST = "FSP_KEY_LISTS";
+static key_t shm_keys[FS_MAX_NUM_WORKER];
+static int g_num_workers = 0;
 
+static void init_shm_keys(char *keys);
+static void clean_exit() {
+	exit(fs_exit());
+}
 static inline int check_if_fsp_path(const char *path) {
   return strncmp(path, fsp_dir_prefix, 3) == 0;
 }
@@ -1020,6 +1029,19 @@ hook(long syscall_number,
 	return 0;
 }
 
+
+static void init_shm_keys(char *keys) {
+  char *token = strtok(keys, ",");
+  key_t cur_key;
+  int num_workers = 0;
+  while (token != NULL) {
+    cur_key = atoi(token);
+    shm_keys[num_workers++] = (FS_SHM_KEY_BASE) + cur_key;
+    token = strtok(NULL, ",");
+  }
+  g_num_workers = num_workers;
+}
+
 static __attribute__((constructor)) void
 start(void)
 {
@@ -1034,8 +1056,25 @@ start(void)
 	if (log_fd < 0)
 		syscall_no_intercept(SYS_exit_group, 4);
 
-	fs_register();
+	// fsp init
+	char *fsp_num_workers_str = getenv(FSP_ENV_VAR_KEY_LIST);
+	if (fsp_num_workers_str == NULL) {
+		syscall_no_intercept(SYS_exit_group, 3);
+	}
+	init_shm_keys(fsp_num_workers_str);
+	int rt = fs_init_multi(g_num_workers, shm_keys);
+	if (rt < 0) {
+		syscall_no_intercept(SYS_exit_group, 3);
+	}
+
+	volatile void *ptr = fs_malloc(1024);
+	fs_free((void *)ptr);
+
 	init_fsp_fd_array();
 
 	intercept_hook_point = &hook;
+}
+
+static __attribute__((destructor)) void fsops_shutdown() {
+	clean_exit();
 }
