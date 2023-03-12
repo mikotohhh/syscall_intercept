@@ -1082,7 +1082,8 @@ static bool fsp_syscall_handle(long syscall_number,
 			} else {
 				DO_ORIG_PATH_SYSCALL;
 			}
-			FSP_APPEND_TO_LOG("orig_open AT_FDCWD:%d cur_path:%s arg0:%ld arg0int:%d result:%ld\n", AT_FDCWD, cur_path, args[0], (int)args[0], *result);
+			FSP_APPEND_TO_LOG("orig_open AT_FDCWD:%d cur_path:%s arg0:%ld arg0int:%d result:%ld\n",
+				AT_FDCWD, cur_path, args[0], (int)args[0], *result);
 		}
 	}
 	if (syscall_number == SYS_unlink) {
@@ -1100,7 +1101,8 @@ static bool fsp_syscall_handle(long syscall_number,
 			int ret = fs_mkdir(cur_path, args[1]);
 			SET_RETURN_VAL(ret);
 			int mode_idx = add_fsp_path_mode_gt(cur_path, (mode_t)args[1]);
-			FSP_APPEND_TO_LOG("add_fsp_mode_gt path:%s mode:%ld idx:%d\n", cur_path, args[1], mode_idx);
+			FSP_APPEND_TO_LOG("add_fsp_mode_gt path:%s mode:%ld idx:%d\n",
+				cur_path, args[1], mode_idx);
 		} else {
 			DO_ORIG_PATH_SYSCALL;
 		}
@@ -1129,21 +1131,22 @@ static bool fsp_syscall_handle(long syscall_number,
 			struct stat *stat_buf = (struct stat*)args[1];
 			SET_RETURN_VAL(ret);
 			FSP_APPEND_TO_LOG("g_uid:%d g_gid:%d\n", g_fsp_uid, g_fsp_gid);
-			FSP_APPEND_TO_LOG("fsp_lstat:%s ret:%d uid:%d gid:%d\n", cur_path, ret, stat_buf->st_uid, stat_buf->st_gid);
+			FSP_APPEND_TO_LOG("fsp_lstat:%s ret:%d uid:%d gid:%d mode:%d\n",
+				cur_path, ret, stat_buf->st_uid, stat_buf->st_gid, stat_buf->st_mode);
 			regulate_stat_result(stat_buf, true);
 			mode_t cur_mode = 0;
 			int cur_mode_idx = get_fsp_path_mode_gt(cur_path, &cur_mode);
 			FSP_APPEND_TO_LOG("lookup mode:%d mode_idx:%d\n", cur_mode, cur_mode_idx);
-			if (stat_buf->st_mode | S_IFREG) {
-				stat_buf->st_mode = 33261;
-				FSP_APPEND_TO_LOG("set mode to 33261\n");
-			}else if (stat_buf->st_mode | S_IFDIR) {
-				FSP_APPEND_TO_LOG("set mode to 16877\n");
+			if (stat_buf->st_mode | S_IFDIR) {
+				FSP_APPEND_TO_LOG("set mode from:%d to 16877\n", stat_buf->st_mode);
 				stat_buf->st_mode = 16877;
+			}else if (stat_buf->st_mode | S_IFREG) {
+				FSP_APPEND_TO_LOG("set mode from:%d to 33261\n", stat_buf->st_mode);
+				stat_buf->st_mode = 33261;
 			} else {
 				if (cur_mode_idx >= 0) {
 					stat_buf->st_mode = cur_mode;
-				FSP_APPEND_TO_LOG("set mode to:%d\n", cur_mode);
+					FSP_APPEND_TO_LOG("set mode to:%d\n", cur_mode);
 				}
 			}
 		} else {
@@ -1184,9 +1187,18 @@ static bool fsp_syscall_handle(long syscall_number,
 			DO_ORIG_FD_SYSCALL;
 		}
 	}
+#define DO_FS_ALLOC_RW(op_code) \
+	size_t count = args[2]; \
+	void *cur_buf = fs_malloc(count); \
+	assert (cur_buf != NULL); \
+	ssize_t ret = fs_allocated_##op_code(cur_fd, cur_buf, count); \
+	if (ret >= 0) { \
+		memcpy((void*)args[1], cur_buf, ret); \
+	} \
+	fs_free(cur_buf);
 	if (syscall_number == SYS_read) {
 		if (is_fsp_fd(cur_fd)) {
-			ssize_t ret = fs_allocated_read(cur_fd, (void*)args[1], args[2]);
+			DO_FS_ALLOC_RW(read);
 			SET_RETURN_VAL(ret);
 		} else {
 			DO_ORIG_FD_SYSCALL;
@@ -1194,12 +1206,13 @@ static bool fsp_syscall_handle(long syscall_number,
 	}
 	if (syscall_number == SYS_write) {
 		if (is_fsp_fd(cur_fd)) {
-			ssize_t ret = fs_allocated_write(cur_fd, (void*)args[1], args[2]);
+			DO_FS_ALLOC_RW(write);
 			SET_RETURN_VAL(ret);
 		} else {
 			DO_ORIG_FD_SYSCALL;
 		}
 	}
+#undef DO_FS_ALLOC_RW
 	if (syscall_number == SYS_close) {
 		if (is_fsp_fd(cur_fd)) {
 			int ret = fs_close(cur_fd);
@@ -1318,7 +1331,8 @@ start(void)
 	g_fsp_euid = (uid_t)syscall_no_intercept(SYS_geteuid);
 	g_fsp_gid = (gid_t)syscall_no_intercept(SYS_getgid);
 
-	memset(g_fsp_path_mode_ground_truth, 0, sizeof(struct fsp_path_mode_gt)*NUM_MAX_PATH_MODE_GT);
+	memset(g_fsp_path_mode_ground_truth, 0,
+		sizeof(struct fsp_path_mode_gt)*NUM_MAX_PATH_MODE_GT);
 
 	intercept_hook_point = &hook;
 }
