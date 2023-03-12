@@ -52,6 +52,15 @@
 
 #include "fsapi.h"
 
+
+#define FSP_SHIM_DBG_FLAG false
+#define FSP_SHIM_DBG_ERR(...)       \
+  if (FSP_SHIM_DBG_FLAG) {          \
+    do {                            \
+      fprintf(stderr, __VA_ARGS__); \
+    } while (0);                    \
+  }
+
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
 int log_fd;
@@ -1000,7 +1009,7 @@ static int getdents_by_fsp_readdirs(int fd, struct linux_dirent *dirp, unsigned 
 			cur_linux_dirp->d_reclen = sizeof(struct linux_dirent);
 			memset(cur_linux_dirp->d_name, 0, 256);
 			memcpy(cur_linux_dirp->d_name, dent_p->d_name, 255);
-			fprintf(stderr, "d_name:%s d_off:%ld fsp_dname:%s max:%lu\n",
+			FSP_SHIM_DBG_ERR("d_name:%s d_off:%ld fsp_dname:%s max:%lu\n",
 				cur_linux_dirp->d_name, cur_linux_dirp->d_off, dent_p->d_name,
 					count/sizeof(struct linux_dirent));
 			done_count++;
@@ -1011,10 +1020,10 @@ static int getdents_by_fsp_readdirs(int fd, struct linux_dirent *dirp, unsigned 
 				break;
 			}
 		}
-		fprintf(stderr, "dent_p:%p\n", (void*)dent_p);
 	} while (dent_p != NULL);
 	fsp_readdir_done_cnt[fd_idx] += done_count;
-	fprintf(stderr, "done_count:%u total:%u\n", done_count, fsp_readdir_done_cnt[fd_idx]);
+	FSP_SHIM_DBG_ERR("done_count:%u total:%u\n", done_count,
+		fsp_readdir_done_cnt[fd_idx]);
 	if (fsp_readdir_done_cnt[fd_idx] > 10) {
 		return 0;
 	}
@@ -1089,7 +1098,7 @@ static bool fsp_syscall_handle(long syscall_number,
 				assert(idx >= 0);
 				set_fsp_fd_type(fd, idx, cur_fd_type);
 				if (cur_fd_type == FSP_FD_TYPE_DIR) {
-					fprintf(stderr, "cur_path:%s fd:%d idx:%d\n", cur_path, fd, idx);
+					FSP_SHIM_DBG_ERR("cur_path:%s fd:%d idx:%d\n", cur_path, fd, idx);
 					dir_fd_do_opendir(cur_path, idx, fd);
 				}
 			}
@@ -1147,20 +1156,21 @@ static bool fsp_syscall_handle(long syscall_number,
 	if (syscall_number == SYS_lstat) {
 		if (check_if_fsp_path(cur_path)) {
 			cur_path = TO_NEW_PATH(cur_path);
-			int ret = fs_stat(cur_path, (struct stat *)args[1]);
 			struct stat *stat_buf = (struct stat*)args[1];
+			stat_buf->st_mode = 0;
+			int ret = fs_stat(cur_path, stat_buf);
 			SET_RETURN_VAL(ret);
-			FSP_APPEND_TO_LOG("g_uid:%d g_gid:%d\n", g_fsp_uid, g_fsp_gid);
-			FSP_APPEND_TO_LOG("fsp_lstat:%s ret:%d uid:%d gid:%d mode:%d\n",
+			FSP_SHIM_DBG_ERR("g_uid:%d g_gid:%d\n", g_fsp_uid, g_fsp_gid);
+			FSP_APPEND_TO_LOG("fsp_lstat(%s) ret:%d uid:%d gid:%d mode:%d\n",
 				cur_path, ret, stat_buf->st_uid, stat_buf->st_gid, stat_buf->st_mode);
 			regulate_stat_result(stat_buf, true);
 			mode_t cur_mode = 0;
 			int cur_mode_idx = get_fsp_path_mode_gt(cur_path, &cur_mode);
-			FSP_APPEND_TO_LOG("lookup mode:%d mode_idx:%d\n", cur_mode, cur_mode_idx);
-			if (stat_buf->st_mode | S_IFDIR) {
+			FSP_SHIM_DBG_ERR("lookup mode:%d mode_idx:%d\n", cur_mode, cur_mode_idx);
+			if (stat_buf->st_mode & S_IFDIR) {
 				FSP_APPEND_TO_LOG("set mode from:%d to 16877\n", stat_buf->st_mode);
 				stat_buf->st_mode = 16877;
-			}else if (stat_buf->st_mode | S_IFREG) {
+			}else if (stat_buf->st_mode & S_IFREG) {
 				FSP_APPEND_TO_LOG("set mode from:%d to 33261\n", stat_buf->st_mode);
 				stat_buf->st_mode = 33261;
 			} else {
@@ -1192,7 +1202,7 @@ static bool fsp_syscall_handle(long syscall_number,
 	int cur_fd = (int)args[0];
 
 	if (syscall_number == SYS_getdents64 || syscall_number == SYS_getdents) {
-		fprintf(stderr, "getdents count:%ld\n", args[2]);
+		FSP_SHIM_DBG_ERR("getdents count:%ld\n", args[2]);
 		if (is_fsp_fd(cur_fd)) {
 			int ret = getdents_by_fsp_readdirs(cur_fd, (struct linux_dirent*)args[1], args[2]);
 			SET_RETURN_VAL(ret);
@@ -1251,19 +1261,21 @@ static bool fsp_syscall_handle(long syscall_number,
 		}
 	}
 	if (syscall_number == SYS_fstat || syscall_number == SYS_newfstatat) {
-		fprintf(stderr, "fstat(fd=%d)\n", cur_fd);
+		FSP_SHIM_DBG_ERR("fstat(fd=%d)\n", cur_fd);
 		if (is_fsp_fd(cur_fd)) {
-			int ret = fs_fstat(cur_fd, (struct stat *)args[1]);
 			struct stat *stat_buf = (struct stat*)args[1];
-			if (stat_buf->st_mode | S_IFDIR) {
+			stat_buf->st_mode = 0;
+			int ret = fs_fstat(cur_fd, stat_buf);
+			regulate_stat_result(stat_buf, true);
+			if (stat_buf->st_mode & S_IFDIR) {
 				FSP_APPEND_TO_LOG("fstat set mode from:%d to 16877\n", stat_buf->st_mode);
 				stat_buf->st_mode = 16877;
-			}else if (stat_buf->st_mode | S_IFREG) {
+			}else if (stat_buf->st_mode & S_IFREG) {
 				FSP_APPEND_TO_LOG("fstat set mode from:%d to 33261\n", stat_buf->st_mode);
 				stat_buf->st_mode = 33261;
 			}
 			SET_RETURN_VAL(ret);
-			fprintf(stderr, "fs_fstat(fd=%d) ret:%d\n", cur_fd, ret);
+			FSP_SHIM_DBG_ERR("fs_fstat(fd=%d) ret:%d\n", cur_fd, ret);
 		} else {
 			DO_ORIG_FD_SYSCALL;
 		}
