@@ -82,7 +82,7 @@ static unsigned int fsp_readdir_done_cnt[NUM_MAX_FSP_FD];
 #define FSP_PATH_PREFIX_LEN 3
 static char fsp_dir_prefix[FSP_PATH_PREFIX_LEN] = "FSP";
 // 3 == strlen(fsp_dir_prefix)
-#define TO_NEW_PATH(path) (path + FSP_PATH_PREFIX_LEN)
+#define TO_NEW_PATH(path) (path + 0)
 
 
 static key_t shm_keys[FS_MAX_NUM_WORKER];
@@ -91,11 +91,11 @@ static int g_num_workers = 0;
 // https://man7.org/linux/man-pages/man2/getdents.2.html
 // https://elixir.bootlin.com/linux/v4.7/source/fs/readdir.c#L150
 struct linux_dirent {
-           unsigned long  d_ino;
-           unsigned long  d_off;
-           unsigned short d_reclen;
-           char           d_name[256];
-           unsigned char  d_type;
+	ino_t  d_ino;
+	off_t  d_off;
+	unsigned short d_reclen;
+	unsigned char  d_type;
+	char           d_name[256];
 };
 
 #define FSP_PATH_LEN (128)
@@ -977,6 +977,12 @@ static void check_open_flag_fd_type(long open_flags, int8_t *fd_type) {
 	}
 }
 
+/**
+ * Underlying system call interface:
+ * int getdents(unsigned int fd, struct linux_dirent *dirp, unsigned int count);
+ * count: size of the buffer, glibc use getdents to implement readdir (POSIX)
+ * struct dirent *readdir(DIR *dirp);
+*/
 static int getdents_by_fsp_readdirs(int fd, struct linux_dirent *dirp, unsigned int count) {
 	struct dirent *dent_p;
 	assert (count > 0);
@@ -992,15 +998,27 @@ static int getdents_by_fsp_readdirs(int fd, struct linux_dirent *dirp, unsigned 
 			cur_linux_dirp->d_off = (off_t)(fsp_readdir_done_cnt[fd_idx]) + done_count + 1;
 			cur_linux_dirp->d_type = (unsigned char)dent_p->d_type;
 			cur_linux_dirp->d_reclen = sizeof(struct linux_dirent);
-			memcpy(cur_linux_dirp->d_name, dent_p->d_name, 256);
+			memset(cur_linux_dirp->d_name, 0, 256);
+			memcpy(cur_linux_dirp->d_name, dent_p->d_name, 255);
+			fprintf(stderr, "d_name:%s d_off:%ld fsp_dname:%s max:%lu\n",
+				cur_linux_dirp->d_name, cur_linux_dirp->d_off, dent_p->d_name,
+					count/sizeof(struct linux_dirent));
 			done_count++;
-			if (done_count == count) {
+			if (done_count == count/sizeof(struct linux_dirent)) {
+				break;
+			}
+			if (done_count > 8) {
 				break;
 			}
 		}
+		fprintf(stderr, "dent_p:%p\n", (void*)dent_p);
 	} while (dent_p != NULL);
 	fsp_readdir_done_cnt[fd_idx] += done_count;
-	return done_count;
+	fprintf(stderr, "done_count:%u total:%u\n", done_count, fsp_readdir_done_cnt[fd_idx]);
+	if (fsp_readdir_done_cnt[fd_idx] > 10) {
+		return 0;
+	}
+	return done_count*sizeof(struct linux_dirent);
 }
 
 static int dir_fd_do_opendir(const char* path, int dir_fd_idx, int dir_fd) {
@@ -1068,9 +1086,11 @@ static bool fsp_syscall_handle(long syscall_number,
 			int fd = fd = fs_open(cur_path, (int)args[open_flag_pos], (mode_t)args[open_mode_pos]);
 			if (fd >= 0) {
 				int idx = add_fsp_fd(fd);
+				assert(idx >= 0);
 				set_fsp_fd_type(fd, idx, cur_fd_type);
 				if (cur_fd_type == FSP_FD_TYPE_DIR) {
-					dir_fd_do_opendir(cur_path, fd, idx);
+					fprintf(stderr, "cur_path:%s fd:%d idx:%d\n", cur_path, fd, idx);
+					dir_fd_do_opendir(cur_path, idx, fd);
 				}
 			}
 			SET_RETURN_VAL(fd);
@@ -1172,6 +1192,7 @@ static bool fsp_syscall_handle(long syscall_number,
 	int cur_fd = (int)args[0];
 
 	if (syscall_number == SYS_getdents64 || syscall_number == SYS_getdents) {
+		fprintf(stderr, "getdents count:%ld\n", args[2]);
 		if (is_fsp_fd(cur_fd)) {
 			int ret = getdents_by_fsp_readdirs(cur_fd, (struct linux_dirent*)args[1], args[2]);
 			SET_RETURN_VAL(ret);
@@ -1223,14 +1244,26 @@ static bool fsp_syscall_handle(long syscall_number,
 					append_buffer("fsp_close\n", 10);
 				}
 			}
+			// TODO: add the closedir here by checking if the directory contains
+			// DIR
 		} else {
 			DO_ORIG_FD_SYSCALL;
 		}
 	}
 	if (syscall_number == SYS_fstat || syscall_number == SYS_newfstatat) {
+		fprintf(stderr, "fstat(fd=%d)\n", cur_fd);
 		if (is_fsp_fd(cur_fd)) {
 			int ret = fs_fstat(cur_fd, (struct stat *)args[1]);
+			struct stat *stat_buf = (struct stat*)args[1];
+			if (stat_buf->st_mode | S_IFDIR) {
+				FSP_APPEND_TO_LOG("fstat set mode from:%d to 16877\n", stat_buf->st_mode);
+				stat_buf->st_mode = 16877;
+			}else if (stat_buf->st_mode | S_IFREG) {
+				FSP_APPEND_TO_LOG("fstat set mode from:%d to 33261\n", stat_buf->st_mode);
+				stat_buf->st_mode = 33261;
+			}
 			SET_RETURN_VAL(ret);
+			fprintf(stderr, "fs_fstat(fd=%d) ret:%d\n", cur_fd, ret);
 		} else {
 			DO_ORIG_FD_SYSCALL;
 		}
