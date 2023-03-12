@@ -959,7 +959,7 @@ static bool fsp_syscall_handle(long syscall_number,
 		}
 		DO_ORIG_PATH_SYSCALL;
 		struct stat *stat_buf = (struct stat*)args[1];
-		FSP_APPEND_TO_LOG("fsp_lstat:%s ret:%ld uid:%d gid:%d mode:%d\n", cur_path, *result, stat_buf->st_uid, stat_buf->st_gid, stat_buf->st_mode);
+		FSP_APPEND_TO_LOG("play_lstat:%s ret:%ld uid:%d gid:%d mode:%d\n", cur_path, *result, stat_buf->st_uid, stat_buf->st_gid, stat_buf->st_mode);
 	}
 	// Fd-based operations
 	int cur_fd = (int)args[0];
@@ -996,6 +996,8 @@ static bool fsp_syscall_handle(long syscall_number,
 	if (syscall_number == SYS_fstat || syscall_number == SYS_newfstatat) {
 		DO_LOOKUP_FD;
 		DO_ORIG_FD_SYSCALL;
+		struct stat *stat_buf = (struct stat*)args[1];
+		FSP_APPEND_TO_LOG("play_stat:%d ret:%ld uid:%d gid:%d mode:%d\n", cur_fd, *result, stat_buf->st_uid, stat_buf->st_gid, stat_buf->st_mode);
 	}
 
 #undef DO_ORIG_PATH_SYSCALL
