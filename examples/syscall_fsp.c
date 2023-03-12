@@ -93,6 +93,13 @@ static char fsp_dir_prefix[FSP_PATH_PREFIX_LEN] = "FSP";
 // 3 == strlen(fsp_dir_prefix)
 #define TO_NEW_PATH(path) (path + 0)
 
+// S_IFDIR: 16384
+// S_IFREG: 32768
+// Generated from using syscall_play by normal user
+// It might be related to rw permission, and I always using 0o755 in mkdir
+// 0o755 (493) + 16384 = 16877
+static mode_t kDirStMode = 16877;
+static mode_t kFileStMode = 33261;
 
 static key_t shm_keys[FS_MAX_NUM_WORKER];
 static int g_num_workers = 0;
@@ -1157,7 +1164,6 @@ static bool fsp_syscall_handle(long syscall_number,
 		if (check_if_fsp_path(cur_path)) {
 			cur_path = TO_NEW_PATH(cur_path);
 			struct stat *stat_buf = (struct stat*)args[1];
-			stat_buf->st_mode = 0;
 			int ret = fs_stat(cur_path, stat_buf);
 			SET_RETURN_VAL(ret);
 			FSP_SHIM_DBG_ERR("g_uid:%d g_gid:%d\n", g_fsp_uid, g_fsp_gid);
@@ -1168,20 +1174,23 @@ static bool fsp_syscall_handle(long syscall_number,
 			int cur_mode_idx = get_fsp_path_mode_gt(cur_path, &cur_mode);
 			FSP_SHIM_DBG_ERR("lookup mode:%d mode_idx:%d\n", cur_mode, cur_mode_idx);
 			if (stat_buf->st_mode & S_IFDIR) {
-				FSP_APPEND_TO_LOG("set mode from:%d to 16877\n", stat_buf->st_mode);
-				stat_buf->st_mode = 16877;
-			}else if (stat_buf->st_mode & S_IFREG) {
-				FSP_APPEND_TO_LOG("set mode from:%d to 33261\n", stat_buf->st_mode);
-				stat_buf->st_mode = 33261;
-			} else {
-				if (cur_mode_idx >= 0) {
-					stat_buf->st_mode = cur_mode;
-					FSP_APPEND_TO_LOG("set mode to:%d\n", cur_mode);
+				if (g_fsp_dbg) {
+					FSP_APPEND_TO_LOG("%s set mode from:%d to %d\n",
+						"[fsp_lstat]", stat_buf->st_mode, kDirStMode);
 				}
+				stat_buf->st_mode = kDirStMode;
+			} else if (stat_buf->st_mode & S_IFREG) {
+				if (g_fsp_dbg) {
+					FSP_APPEND_TO_LOG("%s set mode from:%d to %d\n",
+						"[fsp_lstat]", stat_buf->st_mode, kFileStMode);
+				}
+				stat_buf->st_mode = kFileStMode;
 			}
 		} else {
 			DO_ORIG_PATH_SYSCALL;
-			FSP_APPEND_TO_LOG("normal_lstat:%s ret:%ld\n", cur_path, *result);
+			if (g_fsp_dbg) {
+				FSP_APPEND_TO_LOG("%s:%s ret:%ld\n", "[knl_lstat]", cur_path, *result);
+			}
 		}
 	}
 	if (syscall_number == SYS_chmod) {
@@ -1264,20 +1273,28 @@ static bool fsp_syscall_handle(long syscall_number,
 		FSP_SHIM_DBG_ERR("fstat(fd=%d)\n", cur_fd);
 		if (is_fsp_fd(cur_fd)) {
 			struct stat *stat_buf = (struct stat*)args[1];
-			stat_buf->st_mode = 0;
 			int ret = fs_fstat(cur_fd, stat_buf);
 			regulate_stat_result(stat_buf, true);
 			if (stat_buf->st_mode & S_IFDIR) {
-				FSP_APPEND_TO_LOG("fstat set mode from:%d to 16877\n", stat_buf->st_mode);
-				stat_buf->st_mode = 16877;
-			}else if (stat_buf->st_mode & S_IFREG) {
-				FSP_APPEND_TO_LOG("fstat set mode from:%d to 33261\n", stat_buf->st_mode);
-				stat_buf->st_mode = 33261;
+				if (g_fsp_dbg) {
+					FSP_APPEND_TO_LOG("%s set mode from:%d to %d\n",
+						"[fsp_fstat]", stat_buf->st_mode, kDirStMode);
+				}
+				stat_buf->st_mode = kDirStMode;
+			} else if (stat_buf->st_mode & S_IFREG) {
+				if (g_fsp_dbg) {
+					FSP_APPEND_TO_LOG("%s set mode from:%d to %d\n", 
+						"[fsp_fstat]", stat_buf->st_mode, kFileStMode);
+				}
+				stat_buf->st_mode = kFileStMode;
 			}
 			SET_RETURN_VAL(ret);
 			FSP_SHIM_DBG_ERR("fs_fstat(fd=%d) ret:%d\n", cur_fd, ret);
 		} else {
 			DO_ORIG_FD_SYSCALL;
+			if (g_fsp_dbg) {
+				FSP_APPEND_TO_LOG("%s(fd=%d)\n", "[knl_fstat]", cur_fd);
+			}
 		}
 	}
 
