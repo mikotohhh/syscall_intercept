@@ -62,6 +62,7 @@ static size_t buffer_offset;
 #define FS_SHM_KEY_BASE 20190301
 #define FS_MAX_NUM_WORKER 20
 #define NUM_MAX_FSP_FD (10000)
+#define NUM_MAX_PATH_MODE_GT (1000)
 #define FSP_FD_TYPE_EMPTY (0)
 #define FSP_FD_TYPE_FILE (1)
 #define FSP_FD_TYPE_DIR (2)
@@ -71,13 +72,18 @@ static const int kMaxNumFds = NUM_MAX_FSP_FD;
 static const int kInvalidFd = -99;
 static int g_fsp_fd_add_idx = 0;
 static bool g_fsp_dbg = false;
+static gid_t g_fsp_gid;
+static uid_t g_fsp_uid;
+static uid_t g_fsp_euid;
 static int fsp_fds[NUM_MAX_FSP_FD];
 static int8_t fsp_fds_type[NUM_MAX_FSP_FD];
 static struct CFS_DIR* fsp_fd_dirs[NUM_MAX_FSP_FD];
 static unsigned int fsp_readdir_done_cnt[NUM_MAX_FSP_FD];
-static const char *fsp_dir_prefix = "FSP";
+#define FSP_PATH_PREFIX_LEN 3
+static char fsp_dir_prefix[FSP_PATH_PREFIX_LEN] = "FSP";
 // 3 == strlen(fsp_dir_prefix)
-#define TO_NEW_PATH(path) (path + 3)
+#define TO_NEW_PATH(path) (path + FSP_PATH_PREFIX_LEN)
+
 
 static key_t shm_keys[FS_MAX_NUM_WORKER];
 static int g_num_workers = 0;
@@ -92,12 +98,55 @@ struct linux_dirent {
            unsigned char  d_type;
 };
 
+#define FSP_PATH_LEN (128)
+struct fsp_path_mode_gt {
+	char path[FSP_PATH_LEN];
+	mode_t mode;
+};
+// save the ground-truth of path's mode
+static struct fsp_path_mode_gt g_fsp_path_mode_ground_truth[NUM_MAX_PATH_MODE_GT];
+
 static void init_shm_keys(char *keys);
 static void clean_exit() {
 	exit(fs_exit());
 }
+
+static int add_fsp_path_mode_gt(const char *path, mode_t mode_gt) {
+	struct fsp_path_mode_gt *path_mode_ptr;
+	// if exists, then directly update
+	for (int i = 0; i < NUM_MAX_PATH_MODE_GT; i++) {
+		path_mode_ptr = &(g_fsp_path_mode_ground_truth[i]);
+		if (strcmp(path_mode_ptr->path, path) == 0) {
+			path_mode_ptr->mode = mode_gt;
+			return i;
+		}
+	}
+	// insert
+	for (int i = 0; i < NUM_MAX_PATH_MODE_GT; i++) {
+		path_mode_ptr = &(g_fsp_path_mode_ground_truth[i]);
+		if (path_mode_ptr->mode == 0) {
+			strcpy(path_mode_ptr->path, path);
+			path_mode_ptr->mode = mode_gt;
+			return i;
+		}
+	}
+	return -1;
+}
+
+static int get_fsp_path_mode_gt(const char *path, mode_t *mode) {
+	struct fsp_path_mode_gt *path_mode_ptr;
+	for (int i = 0; i < NUM_MAX_PATH_MODE_GT; i++) {
+		path_mode_ptr = &(g_fsp_path_mode_ground_truth[i]);
+		if (strcmp(path_mode_ptr->path, path) == 0) {
+			*mode = path_mode_ptr->mode;
+			return i;
+		}
+	}
+	return -1;
+}
+
 static inline int check_if_fsp_path(const char *path) {
-  return strncmp(path, fsp_dir_prefix, 3) == 0;
+  return strncmp(path, fsp_dir_prefix, FSP_PATH_PREFIX_LEN) == 0;
 }
 
 static int add_fsp_fd(int new_fd) {
@@ -966,6 +1015,13 @@ static int dir_fd_do_opendir(const char* path, int dir_fd_idx, int dir_fd) {
 	return 0;
 }
 
+static void regulate_stat_result(struct stat *stat_buf, bool is_fsp) {
+	if (is_fsp) {
+		stat_buf->st_uid = g_fsp_uid;
+		stat_buf->st_gid = g_fsp_gid;
+	}
+}
+
 static bool fsp_syscall_handle(long syscall_number,
 		const long args[6],
 		long *result)
@@ -978,9 +1034,24 @@ static bool fsp_syscall_handle(long syscall_number,
 	syscall_no_intercept(syscall_number, args[0], cur_path, args[2], args[3], args[4], args[5]); \
 	handled = true;
 
+// We want these two updates to be always paired
+#define SET_RETURN_VAL(ret_val) \
+	*result = ret_val; \
+	handled = true;
+
+#define FSP_LOCAL_LOG_SZ 256
+#define FSP_APPEND_TO_LOG(...)   \
+  do {                            \
+	memset(local_log_buf, 0, FSP_LOCAL_LOG_SZ); \
+	sprintf(local_log_buf, __VA_ARGS__); \
+	append_buffer(local_log_buf, strlen(local_log_buf)); \
+  } while (0);
+
 	bool handled = false;
 	char *cur_path = (char*)args[0];
 	int8_t cur_fd_type = FSP_FD_TYPE_FILE;
+	char local_log_buf[FSP_LOCAL_LOG_SZ];
+	UNUSED(local_log_buf);
 	
 	// Path-based operations
 	if (syscall_number == SYS_open || syscall_number == SYS_openat) {
@@ -1002,18 +1073,23 @@ static bool fsp_syscall_handle(long syscall_number,
 					dir_fd_do_opendir(cur_path, fd, idx);
 				}
 			}
-			*result = fd;
-			handled = true;
+			SET_RETURN_VAL(fd);
 		} else {
-			DO_ORIG_PATH_SYSCALL;
+			if (cur_path[0] == 'c' && cur_path[1] == 'p') {
+				int ret = (int)syscall_no_intercept(SYS_open, args[1], args[2]);
+				*result = ret;
+				FSP_APPEND_TO_LOG("tweak ret:%d\n", ret);
+			} else {
+				DO_ORIG_PATH_SYSCALL;
+			}
+			FSP_APPEND_TO_LOG("orig_open AT_FDCWD:%d cur_path:%s arg0:%ld arg0int:%d result:%ld\n", AT_FDCWD, cur_path, args[0], (int)args[0], *result);
 		}
 	}
 	if (syscall_number == SYS_unlink) {
 		if (check_if_fsp_path(cur_path)) {
 			cur_path = TO_NEW_PATH(cur_path);
 			int ret = fs_unlink(cur_path);
-			*result = ret;
-			handled = true;
+			SET_RETURN_VAL(ret);
 		} else {
 			DO_ORIG_PATH_SYSCALL;
 		}
@@ -1022,8 +1098,9 @@ static bool fsp_syscall_handle(long syscall_number,
 		if (check_if_fsp_path(cur_path)) {
 			cur_path = TO_NEW_PATH(cur_path);
 			int ret = fs_mkdir(cur_path, args[1]);
-			*result = ret;
-			handled = true;
+			SET_RETURN_VAL(ret);
+			int mode_idx = add_fsp_path_mode_gt(cur_path, (mode_t)args[1]);
+			FSP_APPEND_TO_LOG("add_fsp_mode_gt path:%s mode:%ld idx:%d\n", cur_path, args[1], mode_idx);
 		} else {
 			DO_ORIG_PATH_SYSCALL;
 		}
@@ -1035,11 +1112,9 @@ static bool fsp_syscall_handle(long syscall_number,
 				cur_path = TO_NEW_PATH(cur_path);
 				dst_path = TO_NEW_PATH(dst_path);
 				int ret = fs_rename(cur_path, dst_path);
-				*result = ret;
-				handled = true;
+				SET_RETURN_VAL(ret);
 			} else {
-				*result = -1;
-				handled = true;
+				SET_RETURN_VAL(-1);
 			}
 		} else {
 			*result = syscall_no_intercept(syscall_number, cur_path, dst_path,
@@ -1051,25 +1126,52 @@ static bool fsp_syscall_handle(long syscall_number,
 		if (check_if_fsp_path(cur_path)) {
 			cur_path = TO_NEW_PATH(cur_path);
 			int ret = fs_stat(cur_path, (struct stat *)args[1]);
-			*result = ret;
+			struct stat *stat_buf = (struct stat*)args[1];
+			SET_RETURN_VAL(ret);
+			FSP_APPEND_TO_LOG("g_uid:%d g_gid:%d\n", g_fsp_uid, g_fsp_gid);
+			FSP_APPEND_TO_LOG("fsp_lstat:%s ret:%d uid:%d gid:%d\n", cur_path, ret, stat_buf->st_uid, stat_buf->st_gid);
+			regulate_stat_result(stat_buf, true);
+			mode_t cur_mode = 0;
+			int cur_mode_idx = get_fsp_path_mode_gt(cur_path, &cur_mode);
+			FSP_APPEND_TO_LOG("lookup mode:%d mode_idx:%d\n", cur_mode, cur_mode_idx);
+			if (stat_buf->st_mode | S_IFREG) {
+				stat_buf->st_mode = 33261;
+				FSP_APPEND_TO_LOG("set mode to 33261\n");
+			}else if (stat_buf->st_mode | S_IFDIR) {
+				FSP_APPEND_TO_LOG("set mode to 16877\n");
+				stat_buf->st_mode = 16877;
+			} else {
+				if (cur_mode_idx >= 0) {
+					stat_buf->st_mode = cur_mode;
+				FSP_APPEND_TO_LOG("set mode to:%d\n", cur_mode);
+				}
+			}
+		} else {
+			DO_ORIG_PATH_SYSCALL;
+			FSP_APPEND_TO_LOG("normal_lstat:%s ret:%ld\n", cur_path, *result);
+		}
+	}
+	if (syscall_number == SYS_chmod) {
+		if (check_if_fsp_path(cur_path)) {
+			cur_path = TO_NEW_PATH(cur_path);
+			FSP_APPEND_TO_LOG("fsp_chmod mode to:%ld\n", args[1]);
+			SET_RETURN_VAL(0);
 		} else {
 			DO_ORIG_PATH_SYSCALL;
 		}
 	}
+
 	// Fd-based operations
-	int cur_fd = (int)args[0];
-	char local_fd_log_buf[100];
-	UNUSED(local_fd_log_buf);
 #define DO_ORIG_FD_SYSCALL *result = \
 	syscall_no_intercept(syscall_number, cur_fd, args[1], args[2], args[3], args[4], args[5]); \
 	handled = true;
-#define DO_LOOKUP_FD if (is_fsp_fd(cur_fd)) { \
-	sprintf(local_fd_log_buf, "fsp_fd(%d)\n", cur_fd); \
-	append_buffer(local_fd_log_buf, strlen(local_fd_log_buf)); }
+
+	int cur_fd = (int)args[0];
+
 	if (syscall_number == SYS_getdents64 || syscall_number == SYS_getdents) {
 		if (is_fsp_fd(cur_fd)) {
-			*result = getdents_by_fsp_readdirs(cur_fd, (struct linux_dirent*)args[1], args[2]);
-			handled = true;
+			int ret = getdents_by_fsp_readdirs(cur_fd, (struct linux_dirent*)args[1], args[2]);
+			SET_RETURN_VAL(ret);
 		} else {
 			DO_ORIG_FD_SYSCALL;
 		}
@@ -1077,32 +1179,31 @@ static bool fsp_syscall_handle(long syscall_number,
 	if (syscall_number == SYS_fadvise64) {
 		if (is_fsp_fd(cur_fd)) {
 			// directly return success if the fd is from FSP
-			*result = 0;
-			handled = true;
+			SET_RETURN_VAL(0);
 		} else {
 			DO_ORIG_FD_SYSCALL;
 		}
 	}
 	if (syscall_number == SYS_read) {
 		if (is_fsp_fd(cur_fd)) {
-			*result = fs_allocated_read(cur_fd, (void*)args[1], args[2]);
-			handled = true;
+			ssize_t ret = fs_allocated_read(cur_fd, (void*)args[1], args[2]);
+			SET_RETURN_VAL(ret);
 		} else {
 			DO_ORIG_FD_SYSCALL;
 		}
 	}
 	if (syscall_number == SYS_write) {
 		if (is_fsp_fd(cur_fd)) {
-			*result = fs_allocated_write(cur_fd, (void*)args[1], args[2]);
-			handled = true;
+			ssize_t ret = fs_allocated_write(cur_fd, (void*)args[1], args[2]);
+			SET_RETURN_VAL(ret);
 		} else {
 			DO_ORIG_FD_SYSCALL;
 		}
 	}
 	if (syscall_number == SYS_close) {
 		if (is_fsp_fd(cur_fd)) {
-			*result = fs_close(cur_fd);
-			handled = true;
+			int ret = fs_close(cur_fd);
+			SET_RETURN_VAL(ret);
 			int idx = del_fsp_fd(cur_fd);
 			if (idx >= 0) {
 				if (g_fsp_dbg) {
@@ -1115,8 +1216,8 @@ static bool fsp_syscall_handle(long syscall_number,
 	}
 	if (syscall_number == SYS_fstat || syscall_number == SYS_newfstatat) {
 		if (is_fsp_fd(cur_fd)) {
-			*result = fs_fstat(cur_fd, (struct stat *)args[1]);
-			handled = true;
+			int ret = fs_fstat(cur_fd, (struct stat *)args[1]);
+			SET_RETURN_VAL(ret);
 		} else {
 			DO_ORIG_FD_SYSCALL;
 		}
@@ -1125,7 +1226,8 @@ static bool fsp_syscall_handle(long syscall_number,
 #undef DO_ORIG_PATH_SYSCALL
 #undef DO_ORIG_PATH_SYSCALL1
 #undef DO_ORIG_FD_SYSCALL
-#undef DO_LOOKUP_FD
+#undef FSP_LOCAL_LOG_SZ
+#undef FSP_APPEND_TO_LOG
 	return handled;
 }
 
@@ -1185,6 +1287,12 @@ start(void)
 	if (log_fd < 0)
 		syscall_no_intercept(SYS_exit_group, 4);
 
+	// init path prefix
+	char *env_fsp_path_prefix = getenv("FSP_PATH_PREFIX");
+	if (env_fsp_path_prefix != NULL) {
+		strncpy(fsp_dir_prefix, env_fsp_path_prefix, FSP_PATH_PREFIX_LEN);
+	}
+
 	// fsp init
 	char *fsp_num_workers_str = getenv("FSP_KEY_LISTS");
 	if (fsp_num_workers_str == NULL) {
@@ -1205,6 +1313,12 @@ start(void)
 	fs_free((void *)ptr);
 
 	init_fsp_fd_array();
+	// init uid/gid
+	g_fsp_uid = (uid_t)syscall_no_intercept(SYS_getuid);
+	g_fsp_euid = (uid_t)syscall_no_intercept(SYS_geteuid);
+	g_fsp_gid = (gid_t)syscall_no_intercept(SYS_getgid);
+
+	memset(g_fsp_path_mode_ground_truth, 0, sizeof(struct fsp_path_mode_gt)*NUM_MAX_PATH_MODE_GT);
 
 	intercept_hook_point = &hook;
 }
