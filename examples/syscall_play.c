@@ -92,9 +92,10 @@ static int find_fsp_fd(int fd) {
 	return -1;
 }
 
+/**
 static inline bool is_fsp_fd(int fd) {
 	return find_fsp_fd(fd) >= 0;
-}
+}**/
 
 static int del_fsp_fd(int fd) {
 	int idx = find_fsp_fd(fd);

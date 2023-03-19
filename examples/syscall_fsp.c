@@ -1040,6 +1040,7 @@ static int getdents_by_fsp_readdirs(int fd, struct linux_dirent *dirp, unsigned 
 static int dir_fd_do_opendir(const char* path, int dir_fd_idx, int dir_fd) {
 	assert (fsp_fds[dir_fd_idx] == dir_fd);
 	assert(fsp_fd_dirs[dir_fd_idx] == 0);
+	UNUSED(dir_fd);
 	struct CFS_DIR* dirp = fs_opendir(path);
 	if (dirp == NULL) {
 		return -1;
