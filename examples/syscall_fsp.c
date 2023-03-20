@@ -1031,9 +1031,6 @@ static int getdents_by_fsp_readdirs(int fd, struct linux_dirent *dirp, unsigned 
 	fsp_readdir_done_cnt[fd_idx] += done_count;
 	FSP_SHIM_DBG_ERR("done_count:%u total:%u\n", done_count,
 		fsp_readdir_done_cnt[fd_idx]);
-	if (fsp_readdir_done_cnt[fd_idx] > 10) {
-		return 0;
-	}
 	return done_count*sizeof(struct linux_dirent);
 }
 
