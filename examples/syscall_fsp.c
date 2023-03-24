@@ -53,7 +53,7 @@
 #include "fsapi.h"
 
 
-#define FSP_SHIM_DBG_FLAG false
+#define FSP_SHIM_DBG_FLAG 1
 #define FSP_SHIM_DBG_ERR(...)       \
   if (FSP_SHIM_DBG_FLAG) {          \
     do {                            \
@@ -1058,6 +1058,11 @@ static bool fsp_syscall_handle(long syscall_number,
 		const long args[6],
 		long *result)
 {
+
+#define DO_ORIG_SYSCALL *result = \
+	syscall_no_intercept(syscall_number, args[0], args[1], args[2], args[3], args[4], args[5]); \
+	handled = true;
+
 #define DO_ORIG_PATH_SYSCALL *result = \
 	syscall_no_intercept(syscall_number, cur_path, args[1], args[2], args[3], args[4], args[5]); \
 	handled = true;
@@ -1068,7 +1073,11 @@ static bool fsp_syscall_handle(long syscall_number,
 
 // We want these two updates to be always paired
 #define SET_RETURN_VAL(ret_val) \
-	*result = ret_val; \
+	if (ret_val >= 0) {      \
+		*result = ret_val;   \
+	} else {                 \
+		*result = -errno;     \
+	}                        \
 	handled = true;
 
 #define FSP_LOCAL_LOG_SZ 256
@@ -1109,12 +1118,12 @@ static bool fsp_syscall_handle(long syscall_number,
 			}
 			SET_RETURN_VAL(fd);
 		} else {
-			if (cur_path[0] == 'c' && cur_path[1] == 'p') {
+			if (0 && cur_path[0] == 'c' && cur_path[1] == 'p') {
 				int ret = (int)syscall_no_intercept(SYS_open, args[1], args[2]);
 				*result = ret;
 				FSP_APPEND_TO_LOG("tweak ret:%d\n", ret);
 			} else {
-				DO_ORIG_PATH_SYSCALL;
+				DO_ORIG_SYSCALL;
 			}
 			FSP_APPEND_TO_LOG("orig_open AT_FDCWD:%d cur_path:%s arg0:%ld arg0int:%d result:%ld\n",
 				AT_FDCWD, cur_path, args[0], (int)args[0], *result);
@@ -1158,14 +1167,14 @@ static bool fsp_syscall_handle(long syscall_number,
 			handled = true;
 		}
 	}
-	if (syscall_number == SYS_lstat) {
+	if (syscall_number == SYS_lstat || syscall_number == SYS_stat) {
 		if (check_if_fsp_path(cur_path)) {
 			cur_path = TO_NEW_PATH(cur_path);
 			struct stat *stat_buf = (struct stat*)args[1];
 			int ret = fs_stat(cur_path, stat_buf);
 			SET_RETURN_VAL(ret);
 			FSP_SHIM_DBG_ERR("g_uid:%d g_gid:%d\n", g_fsp_uid, g_fsp_gid);
-			FSP_APPEND_TO_LOG("fsp_lstat(%s) ret:%d uid:%d gid:%d mode:%d\n",
+			FSP_APPEND_TO_LOG("fsp_lstat/stat(%s) ret:%d uid:%d gid:%d mode:%d\n",
 				cur_path, ret, stat_buf->st_uid, stat_buf->st_gid, stat_buf->st_mode);
 			regulate_stat_result(stat_buf, true);
 			mode_t cur_mode = 0;
@@ -1187,7 +1196,7 @@ static bool fsp_syscall_handle(long syscall_number,
 		} else {
 			DO_ORIG_PATH_SYSCALL;
 			if (g_fsp_dbg) {
-				FSP_APPEND_TO_LOG("%s:%s ret:%ld\n", "[knl_lstat]", cur_path, *result);
+				FSP_APPEND_TO_LOG("%s:%s ret:%ld\n", "[knl_lstat/stat]", cur_path, *result);
 			}
 		}
 	}
@@ -1225,18 +1234,44 @@ static bool fsp_syscall_handle(long syscall_number,
 			DO_ORIG_FD_SYSCALL;
 		}
 	}
-#define DO_FS_ALLOC_RW(op_code) \
+	if (syscall_number == SYS_fchmod) {
+		if (is_fsp_fd(cur_fd)) {
+			// directly return success if the fd is from FSP
+			SET_RETURN_VAL(0);
+		} else {
+			DO_ORIG_FD_SYSCALL;
+		}
+	}
+#define DO_FS_ALLOC_R \
 	size_t count = args[2]; \
 	void *cur_buf = fs_malloc(count); \
 	assert (cur_buf != NULL); \
-	ssize_t ret = fs_allocated_##op_code(cur_fd, cur_buf, count); \
+	ssize_t ret = fs_allocated_read(cur_fd, cur_buf, count); \
 	if (ret >= 0) { \
 		memcpy((void*)args[1], cur_buf, ret); \
 	} \
 	fs_free(cur_buf);
+
+	if (syscall_number == SYS_lseek) {
+		if (is_fsp_fd(cur_fd)) {
+			int ret = fs_lseek(cur_fd, args[1], args[2]);
+			SET_RETURN_VAL(ret);
+		} else {
+			DO_ORIG_FD_SYSCALL;
+		}
+	}
+
+#define DO_FS_ALLOC_W \
+	size_t count = args[2]; \
+	void *cur_buf = fs_malloc(count); \
+	assert (cur_buf != NULL); \
+	memcpy(cur_buf, (void*)args[1], count); \
+	ssize_t ret = fs_allocated_write(cur_fd, cur_buf, count); \
+	fs_free(cur_buf);
+
 	if (syscall_number == SYS_read) {
 		if (is_fsp_fd(cur_fd)) {
-			DO_FS_ALLOC_RW(read);
+			DO_FS_ALLOC_R
 			SET_RETURN_VAL(ret);
 		} else {
 			DO_ORIG_FD_SYSCALL;
@@ -1244,13 +1279,16 @@ static bool fsp_syscall_handle(long syscall_number,
 	}
 	if (syscall_number == SYS_write) {
 		if (is_fsp_fd(cur_fd)) {
-			DO_FS_ALLOC_RW(write);
+			DO_FS_ALLOC_W
 			SET_RETURN_VAL(ret);
 		} else {
 			DO_ORIG_FD_SYSCALL;
 		}
 	}
-#undef DO_FS_ALLOC_RW
+
+#undef DO_FS_ALLOC_R
+#undef DO_FS_ALLOC_W
+
 	if (syscall_number == SYS_close) {
 		if (is_fsp_fd(cur_fd)) {
 			int ret = fs_close(cur_fd);
