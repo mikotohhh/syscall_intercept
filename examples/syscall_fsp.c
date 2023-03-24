@@ -1118,13 +1118,7 @@ static bool fsp_syscall_handle(long syscall_number,
 			}
 			SET_RETURN_VAL(fd);
 		} else {
-			if (0 && cur_path[0] == 'c' && cur_path[1] == 'p') {
-				int ret = (int)syscall_no_intercept(SYS_open, args[1], args[2]);
-				*result = ret;
-				FSP_APPEND_TO_LOG("tweak ret:%d\n", ret);
-			} else {
-				DO_ORIG_SYSCALL;
-			}
+			DO_ORIG_SYSCALL;
 			FSP_APPEND_TO_LOG("orig_open AT_FDCWD:%d cur_path:%s arg0:%ld arg0int:%d result:%ld\n",
 				AT_FDCWD, cur_path, args[0], (int)args[0], *result);
 		}
