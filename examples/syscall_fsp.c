@@ -1378,7 +1378,7 @@ start(void)
 	}
 
 	char *fsp_intercept_dbg = getenv("FSP_INTERCEPT_DBG");
-	if (fsp_intercept_dbg == NULL) {
+	if (fsp_intercept_dbg != NULL) {
 		g_fsp_dbg = (fsp_intercept_dbg[0] == 'T');
 	}
 
