@@ -47,7 +47,7 @@
 
 int log_fd;
 
-static char buffer[0x20000];
+static char buffer[0x2000000];
 static size_t buffer_offset;
 
 static bool

@@ -49,11 +49,12 @@
 #include <sys/types.h>
 #include <dirent.h>
 #include <assert.h>
+#include <sys/time.h>
 
 #include "fsapi.h"
 
 
-#define FSP_SHIM_DBG_FLAG 1
+#define FSP_SHIM_DBG_FLAG 0
 #define FSP_SHIM_DBG_ERR(...)       \
   if (FSP_SHIM_DBG_FLAG) {          \
     do {                            \
@@ -65,7 +66,7 @@
 
 int log_fd;
 
-static char buffer[0x20000];
+static char buffer[0x2000000];
 static size_t buffer_offset;
 
 #define FS_SHM_KEY_BASE 20190301
@@ -88,6 +89,8 @@ static int fsp_fds[NUM_MAX_FSP_FD];
 static int8_t fsp_fds_type[NUM_MAX_FSP_FD];
 static struct CFS_DIR* fsp_fd_dirs[NUM_MAX_FSP_FD];
 static unsigned int fsp_readdir_done_cnt[NUM_MAX_FSP_FD];
+static int g_fsp_intercepted = 0;
+static uint64_t g_fsp_timer = 0;
 #define FSP_PATH_PREFIX_LEN 3
 static char fsp_dir_prefix[FSP_PATH_PREFIX_LEN] = "FSP";
 // 3 == strlen(fsp_dir_prefix)
@@ -103,6 +106,13 @@ static mode_t kFileStMode = 33261;
 
 static key_t shm_keys[FS_MAX_NUM_WORKER];
 static int g_num_workers = 0;
+
+static uint64_t NowMicros() {
+  static uint64_t kUsecondsPerSecond = 1000000;
+  struct timeval tv;
+  gettimeofday(&tv, 0);
+  return (uint64_t) (tv.tv_sec) * kUsecondsPerSecond + tv.tv_usec;
+}
 
 // https://man7.org/linux/man-pages/man2/getdents.2.html
 // https://elixir.bootlin.com/linux/v4.7/source/fs/readdir.c#L150
@@ -1059,18 +1069,6 @@ static bool fsp_syscall_handle(long syscall_number,
 		long *result)
 {
 
-#define DO_ORIG_SYSCALL *result = \
-	syscall_no_intercept(syscall_number, args[0], args[1], args[2], args[3], args[4], args[5]); \
-	handled = true;
-
-#define DO_ORIG_PATH_SYSCALL *result = \
-	syscall_no_intercept(syscall_number, cur_path, args[1], args[2], args[3], args[4], args[5]); \
-	handled = true;
-
-#define DO_ORIG_PATH_SYSCALL1 *result = \
-	syscall_no_intercept(syscall_number, args[0], cur_path, args[2], args[3], args[4], args[5]); \
-	handled = true;
-
 // We want these two updates to be always paired
 #define SET_RETURN_VAL(ret_val) \
 	if (ret_val >= 0) {      \
@@ -1082,7 +1080,7 @@ static bool fsp_syscall_handle(long syscall_number,
 
 #define FSP_LOCAL_LOG_SZ 256
 #define FSP_APPEND_TO_LOG(...)   \
-  do {                            \
+  if (false) do {                            \
 	memset(local_log_buf, 0, FSP_LOCAL_LOG_SZ); \
 	sprintf(local_log_buf, __VA_ARGS__); \
 	append_buffer(local_log_buf, strlen(local_log_buf)); \
@@ -1118,7 +1116,6 @@ static bool fsp_syscall_handle(long syscall_number,
 			}
 			SET_RETURN_VAL(fd);
 		} else {
-			DO_ORIG_SYSCALL;
 			FSP_APPEND_TO_LOG("orig_open AT_FDCWD:%d cur_path:%s arg0:%ld arg0int:%d result:%ld\n",
 				AT_FDCWD, cur_path, args[0], (int)args[0], *result);
 		}
@@ -1128,8 +1125,6 @@ static bool fsp_syscall_handle(long syscall_number,
 			cur_path = TO_NEW_PATH(cur_path);
 			int ret = fs_unlink(cur_path);
 			SET_RETURN_VAL(ret);
-		} else {
-			DO_ORIG_PATH_SYSCALL;
 		}
 	}
 	if (syscall_number == SYS_mkdir) {
@@ -1140,8 +1135,6 @@ static bool fsp_syscall_handle(long syscall_number,
 			int mode_idx = add_fsp_path_mode_gt(cur_path, (mode_t)args[1]);
 			FSP_APPEND_TO_LOG("add_fsp_mode_gt path:%s mode:%ld idx:%d\n",
 				cur_path, args[1], mode_idx);
-		} else {
-			DO_ORIG_PATH_SYSCALL;
 		}
 	}
 	if (syscall_number == SYS_rename) {
@@ -1155,10 +1148,6 @@ static bool fsp_syscall_handle(long syscall_number,
 			} else {
 				SET_RETURN_VAL(-1);
 			}
-		} else {
-			*result = syscall_no_intercept(syscall_number, cur_path, dst_path,
-				args[2], args[3], args[4], args[5]);
-			handled = true;
 		}
 	}
 	if (syscall_number == SYS_lstat || syscall_number == SYS_stat) {
@@ -1188,7 +1177,6 @@ static bool fsp_syscall_handle(long syscall_number,
 				stat_buf->st_mode = kFileStMode;
 			}
 		} else {
-			DO_ORIG_PATH_SYSCALL;
 			if (g_fsp_dbg) {
 				FSP_APPEND_TO_LOG("%s:%s ret:%ld\n", "[knl_lstat/stat]", cur_path, *result);
 			}
@@ -1199,15 +1187,8 @@ static bool fsp_syscall_handle(long syscall_number,
 			cur_path = TO_NEW_PATH(cur_path);
 			FSP_APPEND_TO_LOG("fsp_chmod mode to:%ld\n", args[1]);
 			SET_RETURN_VAL(0);
-		} else {
-			DO_ORIG_PATH_SYSCALL;
 		}
 	}
-
-	// Fd-based operations
-#define DO_ORIG_FD_SYSCALL *result = \
-	syscall_no_intercept(syscall_number, cur_fd, args[1], args[2], args[3], args[4], args[5]); \
-	handled = true;
 
 	int cur_fd = (int)args[0];
 
@@ -1216,24 +1197,18 @@ static bool fsp_syscall_handle(long syscall_number,
 		if (is_fsp_fd(cur_fd)) {
 			int ret = getdents_by_fsp_readdirs(cur_fd, (struct linux_dirent*)args[1], args[2]);
 			SET_RETURN_VAL(ret);
-		} else {
-			DO_ORIG_FD_SYSCALL;
 		}
 	}
 	if (syscall_number == SYS_fadvise64) {
 		if (is_fsp_fd(cur_fd)) {
 			// directly return success if the fd is from FSP
 			SET_RETURN_VAL(0);
-		} else {
-			DO_ORIG_FD_SYSCALL;
 		}
 	}
 	if (syscall_number == SYS_fchmod) {
 		if (is_fsp_fd(cur_fd)) {
 			// directly return success if the fd is from FSP
 			SET_RETURN_VAL(0);
-		} else {
-			DO_ORIG_FD_SYSCALL;
 		}
 	}
 #define DO_FS_ALLOC_R \
@@ -1250,8 +1225,6 @@ static bool fsp_syscall_handle(long syscall_number,
 		if (is_fsp_fd(cur_fd)) {
 			int ret = fs_lseek(cur_fd, args[1], args[2]);
 			SET_RETURN_VAL(ret);
-		} else {
-			DO_ORIG_FD_SYSCALL;
 		}
 	}
 
@@ -1267,16 +1240,12 @@ static bool fsp_syscall_handle(long syscall_number,
 		if (is_fsp_fd(cur_fd)) {
 			DO_FS_ALLOC_R
 			SET_RETURN_VAL(ret);
-		} else {
-			DO_ORIG_FD_SYSCALL;
 		}
 	}
 	if (syscall_number == SYS_write) {
 		if (is_fsp_fd(cur_fd)) {
 			DO_FS_ALLOC_W
 			SET_RETURN_VAL(ret);
-		} else {
-			DO_ORIG_FD_SYSCALL;
 		}
 	}
 
@@ -1295,8 +1264,6 @@ static bool fsp_syscall_handle(long syscall_number,
 			}
 			// TODO: add the closedir here by checking if the directory contains
 			// DIR
-		} else {
-			DO_ORIG_FD_SYSCALL;
 		}
 	}
 	if (syscall_number == SYS_fstat || syscall_number == SYS_newfstatat) {
@@ -1321,7 +1288,6 @@ static bool fsp_syscall_handle(long syscall_number,
 			SET_RETURN_VAL(ret);
 			FSP_SHIM_DBG_ERR("fs_fstat(fd=%d) ret:%d\n", cur_fd, ret);
 		} else {
-			DO_ORIG_FD_SYSCALL;
 			if (g_fsp_dbg) {
 				FSP_APPEND_TO_LOG("%s(fd=%d)\n", "[knl_fstat]", cur_fd);
 			}
@@ -1333,6 +1299,16 @@ static bool fsp_syscall_handle(long syscall_number,
 #undef DO_ORIG_FD_SYSCALL
 #undef FSP_LOCAL_LOG_SZ
 #undef FSP_APPEND_TO_LOG
+
+	if (handled) {
+		if (g_fsp_intercepted % 100 == 0) {
+			uint64_t temp = NowMicros();
+			if (g_fsp_timer != 0) printf("Intercepted: %d Time: %lu us\n", g_fsp_intercepted, temp - g_fsp_timer);
+			g_fsp_timer = temp;
+		}
+		g_fsp_intercepted += 1;
+	}
+	
 	return handled;
 }
 
