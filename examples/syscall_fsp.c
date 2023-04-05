@@ -50,6 +50,7 @@
 #include <dirent.h>
 #include <assert.h>
 #include <sys/time.h>
+#include <time.h>
 
 #include "fsapi.h"
 
@@ -112,6 +113,13 @@ static uint64_t NowMicros() {
   struct timeval tv;
   gettimeofday(&tv, 0);
   return (uint64_t) (tv.tv_sec) * kUsecondsPerSecond + tv.tv_usec;
+}
+
+static uint64_t NowNanos() {
+  static uint64_t kUsecondsPerSecond = 1000000000;
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t) (ts.tv_sec) * kUsecondsPerSecond + ts.tv_nsec;
 }
 
 // https://man7.org/linux/man-pages/man2/getdents.2.html
@@ -1068,6 +1076,7 @@ static bool fsp_syscall_handle(long syscall_number,
 		const long args[6],
 		long *result)
 {
+	// uint64_t temp = NowNanos();
 
 // We want these two updates to be always paired
 #define SET_RETURN_VAL(ret_val) \
@@ -1300,14 +1309,16 @@ static bool fsp_syscall_handle(long syscall_number,
 #undef FSP_LOCAL_LOG_SZ
 #undef FSP_APPEND_TO_LOG
 
-	if (handled) {
-		if (g_fsp_intercepted % 100 == 0) {
-			uint64_t temp = NowMicros();
-			if (g_fsp_timer != 0) printf("Intercepted: %d Time: %lu us\n", g_fsp_intercepted, temp - g_fsp_timer);
-			g_fsp_timer = temp;
-		}
-		g_fsp_intercepted += 1;
-	}
+	// if (handled) {
+	// 	if (g_fsp_intercepted % 100 == 0) {
+	// 		// uint64_t temp = NowMicros();
+	// 		// if (g_fsp_timer != 0) printf("Intercepted: %d Time: %lu us\n", g_fsp_intercepted, temp - g_fsp_timer);
+	// 		// g_fsp_timer = temp;
+	// 		uint64_t time_lapse = NowNanos() - temp;
+	// 		printf("%ld %lu\n", syscall_number, time_lapse);
+	// 	}
+	// 	g_fsp_intercepted += 1;
+	// }
 	
 	return handled;
 }

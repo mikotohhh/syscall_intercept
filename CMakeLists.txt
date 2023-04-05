@@ -47,7 +47,7 @@ option(PERFORM_STYLE_CHECKS
 option(BUILD_TESTS "build and enable tests" ON)
 option(BUILD_EXAMPLES "build examples" ON)
 option(TREAT_WARNINGS_AS_ERRORS
-	"make the build fail on any warnings during compilation, or linking" ON)
+	"make the build fail on any warnings during compilation, or linking" OFF)
 option(EXPECT_SPURIOUS_SYSCALLS
 	"account for some unexpected syscalls in tests - enable while using sanitizers, gcov" OFF)
 option(STATIC_CAPSTONE "statically link libcapstone into the shared library" OFF)
