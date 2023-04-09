@@ -11,9 +11,10 @@ CFS_ROOT_DIR = os.environ['CFS_ROOT_DIR']
 MKFS_SPDK_BIN = os.environ['MKFS_SPDK_BIN']
 CFS_MAIN_BIN_NAME = os.environ['CFS_MAIN_BIN_NAME']
 
-assert (len(sys.argv) == 3)
-log_type = sys.argv[1]
-output_dir = sys.argv[2]
+assert (len(sys.argv) == 4)
+output_dir = sys.argv[1]
+output_file = sys.argv[2]
+is_fault = int(sys.argv[3])
 try:
     os.mkdir(output_dir)
 except:
@@ -106,8 +107,7 @@ def start_leveldb(trace_path, num_app, num_worker, log_dir):
     ]
     return subprocess.run(ldb_load_command)
 
-timer_out = open(f"{output_dir}/timer.out", "w")
-for op_num in range(1000, 49000, 1000):
+timer_out = open(f"{output_dir}/{output_file}.timer", "w")
     # Do mkfs
     # mkfs()
 
@@ -129,38 +129,19 @@ for op_num in range(1000, 49000, 1000):
     # # Checkpoint the journal
     # checkpoint_journal()
 
-    # Run trace
-    with open(f"{output_dir}/fault_op_num-{op_num}-0.out", "w") as fsp_out:
-        fs_proc = start_fsp(f"--fault_op_num {op_num}", fsp_out)
+# Run trace
+with open(f"{output_dir}/{output_file}.fsp", "w") as fsp_out:
+    fs_proc = start_fsp("--fault_op_num 30000" if is_fault == 1 else "", fsp_out)
 
-    start_time = time.perf_counter_ns()
-    with open(f"{output_dir}/fault_op_num-{op_num}-app.out", "w") as app_out:
-        p = subprocess.Popen("LD_PRELOAD=../build/examples/libsyscall_fsp.so cp -r FSPs FSPd", shell=True, stdout=app_out, stderr=app_out)
+start_time = time.perf_counter_ns()
+with open(f"{output_dir}/{output_file}.app", "w") as app_out:
+    p = subprocess.Popen("LD_PRELOAD=../build/examples/libsyscall_fsp.so cp -r FSPs FSPd", shell=True, stdout=app_out, stderr=app_out)
 
-    # time.sleep(10)
+p.wait()
 
-    # shutdown_fsp(fs_proc)
+time_elapse = int((time.perf_counter_ns() - start_time) / 1000)
+print(f"Time: {time_elapse} us\n", file=timer_out)
 
-    # fs_proc.wait()
+time.sleep(5)
 
-    # with open(f"{output_dir}/fault_op_num-{op_num}-1.out", "w") as fsp_out:
-    #     fs_proc = start_fsp("-r" if log_type == "eclog" else "-o" if log_type == "oplog" else "-t", fsp_out)
-
-    p.wait()
-    if log_type != "eclog" and log_type != "oplog":
-        with open(f"{output_dir}/fault_op_num-{op_num}-appretry.out", "w") as app_out:
-            p = subprocess.Popen("LD_PRELOAD=../build/examples/libsyscall_fsp.so cp -r FSPs FSPd", shell=True, stdout=app_out, stderr=app_out)
-    p.wait()
-    
-    time_elapse = int((time.perf_counter_ns() - start_time) / 1000)
-    print(f"Fault_op_num: {op_num} Time: {time_elapse} us\n", file=timer_out)
-
-    time.sleep(5)
-
-    shutdown_fsp(fs_proc)
-    
-    if p.returncode != 0:
-        print(f"Fault_op_num: {op_num} app error\n", file=timer_out)
-    else:
-        print(f"Fault_op_num: {op_num} app success\n", file=timer_out)
-    timer_out.flush()
+shutdown_fsp(fs_proc)

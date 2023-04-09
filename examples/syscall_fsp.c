@@ -1076,7 +1076,11 @@ static bool fsp_syscall_handle(long syscall_number,
 		const long args[6],
 		long *result)
 {
-	// uint64_t temp = NowNanos();
+	uint64_t single = 0;
+	if ((g_fsp_intercepted + 1) % 100 == 0) {
+		single = NowNanos();
+	}
+
 
 // We want these two updates to be always paired
 #define SET_RETURN_VAL(ret_val) \
@@ -1309,16 +1313,15 @@ static bool fsp_syscall_handle(long syscall_number,
 #undef FSP_LOCAL_LOG_SZ
 #undef FSP_APPEND_TO_LOG
 
-	// if (handled) {
-	// 	if (g_fsp_intercepted % 100 == 0) {
-	// 		// uint64_t temp = NowMicros();
-	// 		// if (g_fsp_timer != 0) printf("Intercepted: %d Time: %lu us\n", g_fsp_intercepted, temp - g_fsp_timer);
-	// 		// g_fsp_timer = temp;
-	// 		uint64_t time_lapse = NowNanos() - temp;
-	// 		printf("%ld %lu\n", syscall_number, time_lapse);
-	// 	}
-	// 	g_fsp_intercepted += 1;
-	// }
+	if (handled) {
+		if (!g_fsp_intercepted) g_fsp_timer = NowNanos();
+		if ((g_fsp_intercepted + 1) % 100 == 0) {
+			uint64_t temp = NowNanos();
+			printf("num: %d step: %lu single: %lu op: %ld \n", g_fsp_intercepted + 1, temp - g_fsp_timer, temp - single, syscall_number);
+			g_fsp_timer = temp;
+		}
+		g_fsp_intercepted += 1;
+	}
 	
 	return handled;
 }
