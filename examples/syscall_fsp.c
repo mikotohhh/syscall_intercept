@@ -92,6 +92,7 @@ static struct CFS_DIR* fsp_fd_dirs[NUM_MAX_FSP_FD];
 static unsigned int fsp_readdir_done_cnt[NUM_MAX_FSP_FD];
 static int g_fsp_intercepted = 0;
 static uint64_t g_fsp_timer = 0;
+static int g_timer_fd;
 #define FSP_PATH_PREFIX_LEN 3
 static char fsp_dir_prefix[FSP_PATH_PREFIX_LEN] = "FSP";
 // 3 == strlen(fsp_dir_prefix)
@@ -999,15 +1000,15 @@ print_syscall(const struct syscall_desc *desc,
 					args, result);
 
 	*c++ = '\n';
-	append_buffer(local_buffer, c - local_buffer);
+	// append_buffer(local_buffer, c - local_buffer);
 }
 
 static void check_open_flag_fd_type(long open_flags, int8_t *fd_type) {
 	if (open_flags & O_DIRECTORY) {
-		if (g_fsp_dbg) append_buffer("Dir\n", 4);
+		// if (g_fsp_dbg) append_buffer("Dir\n", 4);
 		*fd_type = FSP_FD_TYPE_DIR;
 	} else {
-		if (g_fsp_dbg) append_buffer("File\n", 5);
+		// if (g_fsp_dbg) append_buffer("File\n", 5);
 	}
 }
 
@@ -1076,10 +1077,12 @@ static bool fsp_syscall_handle(long syscall_number,
 		const long args[6],
 		long *result)
 {
+#ifdef SINGLE_OP_TIMER
 	uint64_t single = 0;
-	if ((g_fsp_intercepted + 1) % 100 == 0) {
+	if ((g_fsp_intercepted + 1) % 1 == 0) {
 		single = NowNanos();
 	}
+#endif
 
 
 // We want these two updates to be always paired
@@ -1272,7 +1275,7 @@ static bool fsp_syscall_handle(long syscall_number,
 			int idx = del_fsp_fd(cur_fd);
 			if (idx >= 0) {
 				if (g_fsp_dbg) {
-					append_buffer("fsp_close\n", 10);
+					// append_buffer("fsp_close\n", 10);
 				}
 			}
 			// TODO: add the closedir here by checking if the directory contains
@@ -1313,15 +1316,17 @@ static bool fsp_syscall_handle(long syscall_number,
 #undef FSP_LOCAL_LOG_SZ
 #undef FSP_APPEND_TO_LOG
 
+#ifdef SINGLE_OP_TIMER
 	if (handled) {
-		if (!g_fsp_intercepted) g_fsp_timer = NowNanos();
-		if ((g_fsp_intercepted + 1) % 100 == 0) {
+		// if (!g_fsp_intercepted) g_fsp_timer = NowNanos();
+		if ((g_fsp_intercepted + 1) % 1 == 0) {
 			uint64_t temp = NowNanos();
-			printf("num: %d step: %lu single: %lu op: %ld \n", g_fsp_intercepted + 1, temp - g_fsp_timer, temp - single, syscall_number);
-			g_fsp_timer = temp;
+			printf("num: %d single: %lu op: %ld \n", g_fsp_intercepted + 1, temp - single, syscall_number);
+			// g_fsp_timer = temp;
 		}
 		g_fsp_intercepted += 1;
 	}
+#endif
 	
 	return handled;
 }
@@ -1339,9 +1344,12 @@ hook(long syscall_number,
 
 	if (desc != NULL && desc->return_type == rnoreturn) {
 		print_syscall(desc, syscall_number, args, 0);
-		if (syscall_number == SYS_exit_group && buffer_offset > 0)
-			syscall_no_intercept(SYS_write, log_fd,
-						buffer, buffer_offset);
+		if (syscall_number == SYS_exit_group) {
+			char local_buffer[0x30];
+			sprintf(local_buffer, "Time: %lu ns\n", NowNanos() - g_fsp_timer);
+			append_buffer(local_buffer, strlen(local_buffer));
+			syscall_no_intercept(SYS_write, log_fd, buffer, buffer_offset);
+		}
 	}
 
 	int handled = fsp_syscall_handle(syscall_number,  args, result);
@@ -1350,7 +1358,7 @@ hook(long syscall_number,
 					arg0, arg1, arg2, arg3, arg4, arg5);
 	}
 
-	print_syscall(desc, syscall_number, args, *result);
+	// print_syscall(desc, syscall_number, args, *result);
 
 	return 0;
 }
@@ -1377,7 +1385,7 @@ start(void)
 		syscall_no_intercept(SYS_exit_group, 3);
 
 	log_fd = (int)syscall_no_intercept(SYS_open,
-			path, O_CREAT | O_RDWR, (mode_t)0700);
+			path, O_CREAT | O_TRUNC | O_RDWR, (mode_t)0777);
 
 	if (log_fd < 0)
 		syscall_no_intercept(SYS_exit_group, 4);
@@ -1417,8 +1425,17 @@ start(void)
 		sizeof(struct fsp_path_mode_gt)*NUM_MAX_PATH_MODE_GT);
 
 	intercept_hook_point = &hook;
+	// char* g_fsp_timer_fname = getenv("INT_TIMER");
+	// if (!g_fsp_timer_fname) g_fsp_timer_fname = "temptimer";
+	// g_timer_file = fopen(g_fsp_timer_fname, "w");
+	g_fsp_timer = NowNanos();
 }
 
 static __attribute__((destructor)) void fsops_shutdown() {
+	// fprintf(g_timer_file, "Time: %lu ns\n", NowNanos() - g_fsp_timer);
+	// char local_buffer[0x30];
+	// sprintf(local_buffer, "Time: %lu ns\n", NowNanos() - g_fsp_timer);
+	// append_buffer(local_buffer, strlen(local_buffer));
+	// syscall_no_intercept(SYS_write, log_fd, buffer, buffer_offset);
 	clean_exit();
 }

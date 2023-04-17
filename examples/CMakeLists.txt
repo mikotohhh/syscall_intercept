@@ -49,6 +49,7 @@ message("CFS_ROOT_DIR:${CFS_ROOT_DIR}")
 set(CFS_INC "${CFS_ROOT_DIR}/include")
 set(CFS_BUILD "${CFS_ROOT_DIR}/build")
 
+
 include_directories(${CFS_INC})
 message("CFS_INC:${CFS_INC}")
 link_directories(${CFS_BUILD})
@@ -60,5 +61,9 @@ include_directories(${gflags_INCLUDE_DIR})
 link_directories("${CFS_ROOT_DIR}/lib/tbb/build/tbb_build_release")
 
 add_library(syscall_fsp SHARED syscall_fsp.c syscall_desc.c)
+option(SINGLE_OP_TIMER "single_op_timer" OFF)
+if (SINGLE_OP_TIMER)
+	target_compile_definitions(syscall_fsp PRIVATE SINGLE_OP_TIMER)
+endif()
 target_link_libraries(syscall_fsp PRIVATE syscall_intercept_shared
 	dl cfs rt stdc++ tbb tbbmalloc iberty)

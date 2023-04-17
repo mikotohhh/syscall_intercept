@@ -107,7 +107,7 @@ def start_leveldb(trace_path, num_app, num_worker, log_dir):
     return subprocess.run(ldb_load_command)
 
 timer_out = open(f"{output_dir}/timer.out", "w")
-for op_num in range(1000, 49000, 1000):
+for op_num in range(499, 48001, 499):
     # Do mkfs
     # mkfs()
 
@@ -134,6 +134,7 @@ for op_num in range(1000, 49000, 1000):
         fs_proc = start_fsp(f"--fault_op_num {op_num}", fsp_out)
 
     start_time = time.perf_counter_ns()
+    os.environ["SYSCALL_LOG_PATH"] = f"{output_dir}/fault_op_num-{op_num}-app.timer"
     with open(f"{output_dir}/fault_op_num-{op_num}-app.out", "w") as app_out:
         p = subprocess.Popen("LD_PRELOAD=../build/examples/libsyscall_fsp.so cp -r FSPs FSPd", shell=True, stdout=app_out, stderr=app_out)
 
@@ -147,20 +148,20 @@ for op_num in range(1000, 49000, 1000):
     #     fs_proc = start_fsp("-r" if log_type == "eclog" else "-o" if log_type == "oplog" else "-t", fsp_out)
 
     p.wait()
-    if log_type != "eclog" and log_type != "oplog":
+    if log_type == "rawec":
+        time_elapse = int((time.perf_counter_ns() - start_time))
+        print(f"Fault_op_num: {op_num} FirstTime: {time_elapse} us\n", file=timer_out)
+        start_time = time.perf_counter_ns()
+        os.environ["SYSCALL_LOG_PATH"] = f"{output_dir}/fault_op_num-{op_num}-app.timer2"
         with open(f"{output_dir}/fault_op_num-{op_num}-appretry.out", "w") as app_out:
             p = subprocess.Popen("LD_PRELOAD=../build/examples/libsyscall_fsp.so cp -r FSPs FSPd", shell=True, stdout=app_out, stderr=app_out)
     p.wait()
     
-    time_elapse = int((time.perf_counter_ns() - start_time) / 1000)
-    print(f"Fault_op_num: {op_num} Time: {time_elapse} us\n", file=timer_out)
+    time_elapse = int((time.perf_counter_ns() - start_time))
+    print(f"Fault_op_num: {op_num} SecondTime: {time_elapse} us\n", file=timer_out)
 
-    time.sleep(5)
+    time.sleep(2)
 
     shutdown_fsp(fs_proc)
-    
-    if p.returncode != 0:
-        print(f"Fault_op_num: {op_num} app error\n", file=timer_out)
-    else:
-        print(f"Fault_op_num: {op_num} app success\n", file=timer_out)
-    timer_out.flush()
+
+    time.sleep(2)

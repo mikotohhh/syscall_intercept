@@ -11,14 +11,6 @@ CFS_ROOT_DIR = os.environ['CFS_ROOT_DIR']
 MKFS_SPDK_BIN = os.environ['MKFS_SPDK_BIN']
 CFS_MAIN_BIN_NAME = os.environ['CFS_MAIN_BIN_NAME']
 
-assert (len(sys.argv) == 4)
-output_dir = sys.argv[1]
-output_file = sys.argv[2]
-is_fault = int(sys.argv[3])
-try:
-    os.mkdir(output_dir)
-except:
-    pass
 
 
 def mkfs():
@@ -107,6 +99,7 @@ def start_leveldb(trace_path, num_app, num_worker, log_dir):
     ]
     return subprocess.run(ldb_load_command)
 
+# timer_out = open(f"{output_dir}/{output_file}.timer", "w")
     # Do mkfs
     # mkfs()
 
@@ -128,17 +121,13 @@ def start_leveldb(trace_path, num_app, num_worker, log_dir):
     # # Checkpoint the journal
     # checkpoint_journal()
 
+mkfs()
+
 # Run trace
-with open(f"{output_dir}/{output_file}.fsp", "w") as fsp_out:
-    fs_proc = start_fsp("--fault_op_num 30000" if is_fault == 1 else "", fsp_out)
-
-os.environ["SYSCALL_LOG_PATH"] = f"{output_dir}/{output_file}-app.timer"
-with open(f"{output_dir}/{output_file}.app", "w") as app_out:
-    # p = subprocess.Popen("LD_PRELOAD=../build/examples/libsyscall_fsp.so cp -r FSPs FSPd", shell=True, stdout=app_out, stderr=app_out)
-    p = subprocess.Popen("LD_PRELOAD=../build/examples/libsyscall_fsp.so cp -r FSPs FSPd", shell=True, stdout=app_out, stderr=app_out)
-
+fs_proc = start_fsp("", sys.stdout)
+p = subprocess.Popen("LD_PRELOAD=../build/examples/libsyscall_fsp.so cp -r cptest FSPs", shell=True)
 p.wait()
-
 time.sleep(5)
-
 shutdown_fsp(fs_proc)
+time.sleep(2)
+checkpoint_journal()
