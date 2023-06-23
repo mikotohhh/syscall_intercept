@@ -63,6 +63,12 @@
     } while (0);                    \
   }
 
+struct fsp_sort_ctx {
+	int output_fd;
+	int output_fd_dup_target;
+};
+struct fsp_sort_ctx g_fsp_sort_ctx;
+
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
 int log_fd;
@@ -87,6 +93,7 @@ static gid_t g_fsp_gid;
 static uid_t g_fsp_uid;
 static uid_t g_fsp_euid;
 static int fsp_fds[NUM_MAX_FSP_FD];
+static int fsp_fds_flag[NUM_MAX_FSP_FD];
 static int8_t fsp_fds_type[NUM_MAX_FSP_FD];
 static struct CFS_DIR* fsp_fd_dirs[NUM_MAX_FSP_FD];
 static unsigned int fsp_readdir_done_cnt[NUM_MAX_FSP_FD];
@@ -184,7 +191,34 @@ static inline int check_if_fsp_path(const char *path) {
   return strncmp(path, fsp_dir_prefix, FSP_PATH_PREFIX_LEN) == 0;
 }
 
-static int add_fsp_fd(int new_fd) {
+#define FSP_SORT_FNAME_IN_IDX (0)
+#define FSP_SORT_FNAME_OUT_IDX (1)
+static inline int check_if_sort_input_or_output(const char *path, int i_or_o) {
+	if (i_or_o == FSP_SORT_FNAME_IN_IDX && strstr(path, "FSPs.in")) {
+		return 1;
+	}
+	if (i_or_o == FSP_SORT_FNAME_OUT_IDX && strstr(path, "FSPs.out")) {
+		return 1;
+	}
+	return 0;
+}
+
+static inline int check_if_fsp_sort_outfd(int fd) {
+	if (g_fsp_sort_ctx.output_fd < 0) {
+		return 0;
+	}
+	return fd == g_fsp_sort_ctx.output_fd;
+}
+
+static inline int check_if_fsp_sort_outfd_dup_target(int fd) {
+	if (g_fsp_sort_ctx.output_fd_dup_target < 0) {
+		return 0;
+	}
+	return fd == g_fsp_sort_ctx.output_fd_dup_target;
+}
+
+
+static int add_fsp_fd(int new_fd, int flags) {
 	assert (new_fd > FSP_FD_START_VAL);
 	int newfd_idx = -1;
 	for (int i_add = 0; i_add < kMaxNumFds; i_add++) {
@@ -192,6 +226,7 @@ static int add_fsp_fd(int new_fd) {
 		if (fsp_fds[cur_idx] < 0) {
 			newfd_idx = cur_idx;
 			fsp_fds[cur_idx] = new_fd;
+			fsp_fds_flag[cur_idx] = flags;
 			g_fsp_fd_add_idx = cur_idx;
 			break;
 		}
@@ -212,6 +247,15 @@ static int find_fsp_fd(int fd) {
 	for (int i = 0; i < kMaxNumFds; i++) {
 		if (fsp_fds[i] == fd) {
 			return i;
+		}
+	}
+	return -1;
+}
+
+static int find_fsp_fd_flag(int fd) {
+	for(int i = 0; i < kMaxNumFds; i++) {
+		if (fsp_fds[i] == fd) {
+			return fsp_fds_flag[i];
 		}
 	}
 	return -1;
@@ -1117,19 +1161,36 @@ static bool fsp_syscall_handle(long syscall_number,
 			open_flag_pos = 2;
 			open_mode_pos = 3;
 		}
+		errno = 0;
 		check_open_flag_fd_type(args[open_flag_pos], &cur_fd_type);
 		if (check_if_fsp_path(cur_path)) {
-			cur_path = TO_NEW_PATH(cur_path);
-			int fd = fd = fs_open(cur_path, (int)args[open_flag_pos], (mode_t)args[open_mode_pos]);
-			if (fd >= 0) {
-				int idx = add_fsp_fd(fd);
-				assert(idx >= 0);
-				set_fsp_fd_type(fd, idx, cur_fd_type);
-				if (cur_fd_type == FSP_FD_TYPE_DIR) {
-					FSP_SHIM_DBG_ERR("cur_path:%s fd:%d idx:%d\n", cur_path, fd, idx);
-					dir_fd_do_opendir(cur_path, idx, fd);
-				}
+                //   fprintf(stderr,
+                //       "openat cur_path:%s flag:%d is_fsp_path:%d errno:%d\n",
+                //       cur_path, (int)args[open_flag_pos],
+                //       check_if_fsp_path(cur_path), errno);
+                  cur_path = TO_NEW_PATH(cur_path);
+                  int fd = fd = fs_open(cur_path, (int)args[open_flag_pos],
+                                        (mode_t)args[open_mode_pos]);
+                  if (fd >= 0) {
+                    int idx = add_fsp_fd(fd, (int)args[open_flag_pos]);
+                    assert(idx >= 0);
+                    set_fsp_fd_type(fd, idx, cur_fd_type);
+                    if (cur_fd_type == FSP_FD_TYPE_DIR) {
+                      FSP_SHIM_DBG_ERR("cur_path:%s fd:%d idx:%d\n", cur_path,
+                                       fd, idx);
+                      dir_fd_do_opendir(cur_path, idx, fd);
+                    }
+                    // Set errno to 0 to indicate success
+                    errno = 0;
+#ifdef RUN_GNU_SORT
+                    if (check_if_sort_input_or_output(cur_path,
+                                                      FSP_SORT_FNAME_OUT_IDX)) {
+                      FSP_SHIM_DBG_ERR("sort output fd:%d\n", fd);
+                      g_fsp_sort_ctx.output_fd = fd;
+                    }
+#endif // RUN_GNU_SORT
 			}
+			// fprintf(stderr, "openat return fd:%d errorno:%d\n", fd, errno);
 			SET_RETURN_VAL(fd);
 		} else {
 			FSP_APPEND_TO_LOG("orig_open AT_FDCWD:%d cur_path:%s arg0:%ld arg0int:%d result:%ld\n",
@@ -1164,6 +1225,14 @@ static bool fsp_syscall_handle(long syscall_number,
 			} else {
 				SET_RETURN_VAL(-1);
 			}
+		}
+	}
+	if (syscall_number == SYS_access) {
+		if (check_if_fsp_path(cur_path)) {
+			cur_path = TO_NEW_PATH(cur_path);
+			struct stat stat_buf;
+			int ret = fs_stat(cur_path, &stat_buf);
+			SET_RETURN_VAL(ret);
 		}
 	}
 	if (syscall_number == SYS_lstat || syscall_number == SYS_stat) {
@@ -1221,12 +1290,37 @@ static bool fsp_syscall_handle(long syscall_number,
 			SET_RETURN_VAL(0);
 		}
 	}
+	if (syscall_number == SYS_fcntl) {
+		if (is_fsp_fd(cur_fd)) {
+			if (args[1] == F_GETFL) {
+				// SORT only
+				// NOTE: sort's flag is F_GETFL
+				int sort_ret = find_fsp_fd_flag(cur_fd);
+				SET_RETURN_VAL(sort_ret);
+				} else {
+					fprintf(stderr, "fcntl called with fd:%d flag:%ld\n",
+							cur_fd, args[1]);
+			}
+		}
+	}
 	if (syscall_number == SYS_fchmod) {
 		if (is_fsp_fd(cur_fd)) {
 			// directly return success if the fd is from FSP
 			SET_RETURN_VAL(0);
 		}
 	}
+	if (syscall_number == SYS_ftruncate) {
+		off_t truncate_length = (int)args[1];
+#ifdef RUN_GNU_SORT
+		// fprintf(stderr, "ftruncate fd:%d is_dup_target?:%d len:%lu\n", cur_fd,
+		// 	check_if_fsp_sort_outfd_dup_target(cur_fd), truncate_length);
+		if (check_if_fsp_sort_outfd_dup_target(cur_fd)) {
+			SET_RETURN_VAL(truncate_length);
+		}
+#endif // RUN_GNU_SORT
+		SET_RETURN_VAL(truncate_length);
+	}
+
 #define DO_FS_ALLOC_R \
 	size_t count = args[2]; \
 	void *cur_buf = fs_malloc(count); \
@@ -1259,6 +1353,11 @@ static bool fsp_syscall_handle(long syscall_number,
 		}
 	}
 	if (syscall_number == SYS_write) {
+#ifdef RUN_GNU_SORT
+		if (check_if_fsp_sort_outfd_dup_target(cur_fd)) {
+			cur_fd = g_fsp_sort_ctx.output_fd;
+		}
+#endif // RUN_GNU_SORT
 		if (is_fsp_fd(cur_fd)) {
 			DO_FS_ALLOC_W
 			SET_RETURN_VAL(ret);
@@ -1270,6 +1369,12 @@ static bool fsp_syscall_handle(long syscall_number,
 
 	if (syscall_number == SYS_close) {
 		if (is_fsp_fd(cur_fd)) {
+#ifdef RUN_GNU_SORT
+			if (check_if_fsp_sort_outfd(cur_fd)) {
+				FSP_SHIM_DBG_ERR("close dup target fd:%d\n", cur_fd);
+				goto SORT_NO_CLOSE;
+			}
+#endif // RUN_GNU_SORT
 			int ret = fs_close(cur_fd);
 			SET_RETURN_VAL(ret);
 			int idx = del_fsp_fd(cur_fd);
@@ -1281,7 +1386,21 @@ static bool fsp_syscall_handle(long syscall_number,
 			// TODO: add the closedir here by checking if the directory contains
 			// DIR
 		}
+#ifdef RUN_GNU_SORT
+SORT_NO_CLOSE:
+		SET_RETURN_VAL(0);
+#endif // RUN_GNU_SORT
 	}
+	if (syscall_number == SYS_dup2) {
+		int new_fd = (int)args[1];
+#ifdef RUN_GNU_SORT
+		if (check_if_fsp_sort_outfd(cur_fd)) {
+			g_fsp_sort_ctx.output_fd_dup_target = new_fd;
+		}
+#endif // RUN_GNU_SORT
+		FSP_SHIM_DBG_ERR("dup2(%d, %d)\n", cur_fd, new_fd);
+	}
+
 	if (syscall_number == SYS_fstat || syscall_number == SYS_newfstatat) {
 		FSP_SHIM_DBG_ERR("fstat(fd=%d)\n", cur_fd);
 		if (is_fsp_fd(cur_fd)) {
@@ -1420,6 +1539,9 @@ start(void)
 	g_fsp_uid = (uid_t)syscall_no_intercept(SYS_getuid);
 	g_fsp_euid = (uid_t)syscall_no_intercept(SYS_geteuid);
 	g_fsp_gid = (gid_t)syscall_no_intercept(SYS_getgid);
+
+	g_fsp_sort_ctx.output_fd = -1;
+	g_fsp_sort_ctx.output_fd_dup_target = -1;
 
 	memset(g_fsp_path_mode_ground_truth, 0,
 		sizeof(struct fsp_path_mode_gt)*NUM_MAX_PATH_MODE_GT);
