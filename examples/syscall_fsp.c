@@ -1136,6 +1136,7 @@ static bool fsp_syscall_handle(long syscall_number,
 	if (ret_val >= 0) {      \
 		*result = ret_val;   \
 	} else {                 \
+        if (ret_val != -1) errno = -ret_val; \
 		*result = -errno;     \
 	}                        \
 	handled = true;
@@ -1353,7 +1354,7 @@ static bool fsp_syscall_handle(long syscall_number,
 			DO_FS_ALLOC_R
             if (ret <= 0) {
                 // fprintf(stderr, "alloc_read fd%d ret:%ld errno:%d\n", cur_fd, ret, errno);
-                errno = -ret;
+                // errno = -ret;
             }
 			SET_RETURN_VAL(ret);
 		}
@@ -1368,7 +1369,7 @@ static bool fsp_syscall_handle(long syscall_number,
 			DO_FS_ALLOC_W
             if (ret <= 0) {
                 // fprintf(stderr, "alloc_write fd%d ret:%ld errno:%d\n", cur_fd, ret, errno);
-                errno = -ret;
+                // errno = -ret;
             }
 			SET_RETURN_VAL(ret);
 		}
@@ -1487,9 +1488,9 @@ hook(long syscall_number,
 					arg0, arg1, arg2, arg3, arg4, arg5);
 	}
     uint64_t start_nano = NowNanos();
-    static uint64_t kNanoPerMs = 1000000;
+    static uint64_t kNanoPerUS = 1000;
     if (g_fsp_add_spin) {
-        while ((NowNanos() - start_nano) < kNanoPerMs*1) {
+        while ((NowNanos() - start_nano) < kNanoPerUS*100) {
             // spin
         }
     }
