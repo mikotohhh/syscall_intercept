@@ -89,6 +89,7 @@ static const int kMaxNumFds = NUM_MAX_FSP_FD;
 static const int kInvalidFd = -99;
 static int g_fsp_fd_add_idx = 0;
 static bool g_fsp_dbg = false;
+static bool g_fsp_add_spin = false;
 static gid_t g_fsp_gid;
 static uid_t g_fsp_uid;
 static uid_t g_fsp_euid;
@@ -126,7 +127,8 @@ static uint64_t NowMicros() {
 static uint64_t NowNanos() {
   static uint64_t kUsecondsPerSecond = 1000000000;
   struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
+  // clock_gettime(CLOCK_MONOTONIC, &ts);
+  syscall_no_intercept(SYS_clock_gettime, CLOCK_MONOTONIC, &ts);
   return (uint64_t) (ts.tv_sec) * kUsecondsPerSecond + ts.tv_nsec;
 }
 
@@ -1349,6 +1351,10 @@ static bool fsp_syscall_handle(long syscall_number,
 	if (syscall_number == SYS_read) {
 		if (is_fsp_fd(cur_fd)) {
 			DO_FS_ALLOC_R
+            if (ret <= 0) {
+                // fprintf(stderr, "alloc_read fd%d ret:%ld errno:%d\n", cur_fd, ret, errno);
+                errno = -ret;
+            }
 			SET_RETURN_VAL(ret);
 		}
 	}
@@ -1360,6 +1366,10 @@ static bool fsp_syscall_handle(long syscall_number,
 #endif // RUN_GNU_SORT
 		if (is_fsp_fd(cur_fd)) {
 			DO_FS_ALLOC_W
+            if (ret <= 0) {
+                // fprintf(stderr, "alloc_write fd%d ret:%ld errno:%d\n", cur_fd, ret, errno);
+                errno = -ret;
+            }
 			SET_RETURN_VAL(ret);
 		}
 	}
@@ -1476,6 +1486,13 @@ hook(long syscall_number,
 		*result = syscall_no_intercept(syscall_number,
 					arg0, arg1, arg2, arg3, arg4, arg5);
 	}
+    uint64_t start_nano = NowNanos();
+    static uint64_t kNanoPerMs = 1000000;
+    if (g_fsp_add_spin) {
+        while ((NowNanos() - start_nano) < kNanoPerMs*1) {
+            // spin
+        }
+    }
 
 	// print_syscall(desc, syscall_number, args, *result);
 
@@ -1530,6 +1547,11 @@ start(void)
 	if (fsp_intercept_dbg != NULL) {
 		g_fsp_dbg = (fsp_intercept_dbg[0] == 'T');
 	}
+
+    char *fsp_add_spin = getenv("FSP_OP_ADD_SPIN");
+    if (fsp_add_spin != NULL) {
+        g_fsp_add_spin = (fsp_add_spin[0] == 'T');
+    }
 
 	volatile void *ptr = fs_malloc(1024);
 	fs_free((void *)ptr);
