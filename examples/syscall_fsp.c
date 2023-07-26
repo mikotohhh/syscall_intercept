@@ -103,6 +103,8 @@ static uint64_t g_fsp_timer = 0;
 static int g_timer_fd;
 #define FSP_PATH_PREFIX_LEN 3
 static char fsp_dir_prefix[FSP_PATH_PREFIX_LEN] = "FSP";
+static int g_syncall_seq_no = -1;
+static int g_syncall_counter = 0;
 // 3 == strlen(fsp_dir_prefix)
 #define TO_NEW_PATH(path) (path + 0)
 
@@ -1486,6 +1488,15 @@ hook(long syscall_number,
 	if (!handled) {
 		*result = syscall_no_intercept(syscall_number,
 					arg0, arg1, arg2, arg3, arg4, arg5);
+	} else {
+		g_syncall_counter++;
+		// fprintf(stderr, "syscall_seq_no:%d syscall_number:%d\n", 
+		// 	g_syncall_counter, syscall_number);
+		if (g_syncall_counter == g_syncall_seq_no && g_syncall_seq_no > 0) {
+			fprintf(stderr, "syncall_seq_no:%d syscall_number:%d\n", 
+				g_syncall_counter, syscall_number);
+			fs_syncall();
+		}
 	}
     uint64_t start_nano = NowNanos();
     static uint64_t kNanoPerUS = 1000;
@@ -1553,6 +1564,13 @@ start(void)
     if (fsp_add_spin != NULL) {
         g_fsp_add_spin = (fsp_add_spin[0] == 'T');
     }
+
+	char *fsp_syncall_seq_no = getenv("FSP_SYNCALL_SEQ_NO");
+	if (fsp_syncall_seq_no != NULL) {
+		// If specified, will call syncall after the specified number of
+		// file system operations
+		g_syncall_seq_no = atoi(fsp_syncall_seq_no);
+	}
 
 	volatile void *ptr = fs_malloc(1024);
 	fs_free((void *)ptr);
