@@ -154,7 +154,9 @@ static struct fsp_path_mode_gt g_fsp_path_mode_ground_truth[NUM_MAX_PATH_MODE_GT
 
 static void init_shm_keys(char *keys);
 static void clean_exit() {
-	exit(fs_exit());
+	// exit(fs_exit());
+	int ret = fs_exit();
+	if (ret < 0) exit(ret);
 }
 
 static int add_fsp_path_mode_gt(const char *path, mode_t mode_gt) {
