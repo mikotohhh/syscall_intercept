@@ -89,7 +89,7 @@ static const int kMaxNumFds = NUM_MAX_FSP_FD;
 static const int kInvalidFd = -99;
 static int g_fsp_fd_add_idx = 0;
 static bool g_fsp_dbg = false;
-static bool g_fsp_add_spin = false;
+static int g_fsp_add_spin_us = 0;
 static gid_t g_fsp_gid;
 static uid_t g_fsp_uid;
 static uid_t g_fsp_euid;
@@ -105,6 +105,7 @@ static int g_timer_fd;
 static char fsp_dir_prefix[FSP_PATH_PREFIX_LEN] = "FSP";
 static int g_syncall_seq_no = -1;
 static int g_syncall_counter = 0;
+static bool g_fsp_cleanup_done = false;
 // 3 == strlen(fsp_dir_prefix)
 #define TO_NEW_PATH(path) (path + 0)
 
@@ -155,8 +156,10 @@ static struct fsp_path_mode_gt g_fsp_path_mode_ground_truth[NUM_MAX_PATH_MODE_GT
 static void init_shm_keys(char *keys);
 static void clean_exit() {
 	// exit(fs_exit());
+    // if (g_fsp_cleanup_done) return;
 	int ret = fs_exit();
 	if (ret < 0) exit(ret);
+    // g_fsp_cleanup_done = true;
 }
 
 static int add_fsp_path_mode_gt(const char *path, mode_t mode_gt) {
@@ -1492,18 +1495,23 @@ hook(long syscall_number,
 					arg0, arg1, arg2, arg3, arg4, arg5);
 	} else {
 		g_syncall_counter++;
-		// fprintf(stderr, "syscall_seq_no:%d syscall_number:%d\n", 
-		// 	g_syncall_counter, syscall_number);
+		// fprintf(stderr, "syscall_seq_no:%d syscall_number:%d arg0:%ld\n", 
+	    //	 g_syncall_counter, syscall_number, arg0);
 		if (g_syncall_counter == g_syncall_seq_no && g_syncall_seq_no > 0) {
-			fprintf(stderr, "syncall_seq_no:%d syscall_number:%d\n", 
+			fprintf(stderr, "SYNCALL:syncall_seq_no:%d syscall_number:%d\n", 
 				g_syncall_counter, syscall_number);
 			fs_syncall();
 		}
 	}
+    if (syscall_number == SYS_exit || syscall_number == SYS_exit_group) {
+        int ret = fs_exit();
+        if (ret < 0) syscall_no_intercept(SYS_exit, ret);
+        g_fsp_cleanup_done = true;
+    }
     uint64_t start_nano = NowNanos();
     static uint64_t kNanoPerUS = 1000;
-    if (g_fsp_add_spin) {
-        while ((NowNanos() - start_nano) < kNanoPerUS*100) {
+    if (g_fsp_add_spin_us > 0 && syscall_number == SYS_write) {
+        while ((NowNanos() - start_nano) < kNanoPerUS*g_fsp_add_spin_us) {
             // spin
         }
     }
@@ -1562,9 +1570,9 @@ start(void)
 		g_fsp_dbg = (fsp_intercept_dbg[0] == 'T');
 	}
 
-    char *fsp_add_spin = getenv("FSP_OP_ADD_SPIN");
-    if (fsp_add_spin != NULL) {
-        g_fsp_add_spin = (fsp_add_spin[0] == 'T');
+    char *fsp_add_spin_us = getenv("FSP_OP_ADD_SPIN_US");
+    if (fsp_add_spin_us != NULL) {
+        g_fsp_add_spin_us = atoi(fsp_add_spin_us);
     }
 
 	char *fsp_syncall_seq_no = getenv("FSP_SYNCALL_SEQ_NO");
