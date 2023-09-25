@@ -1285,6 +1285,14 @@ static bool fsp_syscall_handle(long syscall_number,
 		}
 	}
 
+    if (syscall_number == SYS_utime) {
+		if (check_if_fsp_path(cur_path)) {
+			cur_path = TO_NEW_PATH(cur_path);
+			FSP_APPEND_TO_LOG("fsp_utime\n");
+			SET_RETURN_VAL(0);
+		}
+    }
+
 	int cur_fd = (int)args[0];
 
 	if (syscall_number == SYS_getdents64 || syscall_number == SYS_getdents) {
@@ -1498,7 +1506,7 @@ hook(long syscall_number,
 		// fprintf(stderr, "syscall_seq_no:%d syscall_number:%d arg0:%ld\n", 
 	    //	 g_syncall_counter, syscall_number, arg0);
 		if (g_syncall_counter == g_syncall_seq_no && g_syncall_seq_no > 0) {
-			fprintf(stderr, "SYNCALL:syncall_seq_no:%d syscall_number:%d\n", 
+			fprintf(stderr, "SYNCALL:syncall_seq_no:%d syscall_number:%ld\n",
 				g_syncall_counter, syscall_number);
 			fs_syncall();
 		}
