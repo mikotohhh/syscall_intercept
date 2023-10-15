@@ -1222,6 +1222,7 @@ static bool fsp_syscall_handle(long syscall_number,
 		errno = 0;
 		check_open_flag_fd_type(args[open_flag_pos], &cur_fd_type);
 		if (check_if_fsp_path(cur_path)) {
+				// DEBUG_PRINT("syscall: open file: %s\n", cur_path); 
                 //   fprintf(stderr,
                 //       "openat cur_path:%s flag:%d is_fsp_path:%d errno:%d\n",
                 //       cur_path, (int)args[open_flag_pos],
@@ -1432,7 +1433,7 @@ the larger read into some smaller reads
 // 		memcpy((void*)args[1], cur_buf, ret); \
 // 	} \
 // 	fs_free(cur_buf);
-// 	// DEBUG_PRINT("syscall: read complete\n"); \
+	// DEBUG_PRINT("syscall: read complete\n"); \
 
 #define DO_FS_ALLOC_R \
     size_t count = args[2]; \
@@ -1460,20 +1461,29 @@ the larger read into some smaller reads
 
 	/*
 	ext4 lseek support set offset beyond EOF and DiskANN code use this 
-	feature, which will cause uFS return err. So I first check size 
+	feature, which will cause ApparateFS return err. So I first check size 
 	of the file, if size is smaller than offset than first write some
 	zero bytes up to the offset
 	*/
 	if (syscall_number == SYS_lseek) {
 		if (is_fsp_fd(cur_fd)) {
+			// DEBUG_PRINT("syscall: receive lseek()\n"); 
 			struct stat stat_buf;
 			int ret_stat = fs_fstat(cur_fd, &stat_buf); 
-			ssize_t st_size = stat_buf.st_size; 			
+			ssize_t st_size = stat_buf.st_size; 	
+			// DEBUG_PRINT("syscall: seek offset: %ld\n", args[1]); 
+			// DEBUG_PRINT("syscall: actual file size: %ld\n", st_size); 
 			if(st_size < args[1]){
 				ssize_t write_sz = args[1] - st_size; 
-				char write_buf[write_sz]; 
+				void *write_buf = fs_malloc(write_sz);
+				assert (write_buf != NULL);
 				memset(write_buf, 0, write_sz);
-				ssize_t ret_write = fs_pwrite(cur_fd, write_buf, write_sz, st_size); 
+				// DEBUG_PRINT("syscall: before seek request write size: %ld\n", write_sz); 
+				ssize_t ret_write = fs_allocated_pwrite(cur_fd, write_buf, write_sz, st_size); 
+				// DEBUG_PRINT("syscall: before seek actual write size: %ld\n", ret_write); 
+				// ret_stat = fs_fstat(cur_fd, &stat_buf); 
+				// st_size = stat_buf.st_size; 	
+				// DEBUG_PRINT("syscall: after enlarge file size: %ld\n", st_size);
 			}
 
 			int ret = fs_lseek(cur_fd, args[1], args[2]);
