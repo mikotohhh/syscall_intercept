@@ -1345,8 +1345,11 @@ static bool fsp_syscall_handle(long syscall_number,
 		for (int i = 0; i < nr; i++){
 			struct iocb *iocb_ptr = iocbpp[i]; 
 			int aio_fd = iocb_ptr->aio_fildes;
+			// DEBUG_PRINT("syscall: request malloc size: %ld\n", iocb_ptr->aio_nbytes); 
+			void *cur_buf = fs_malloc(iocb_ptr->aio_nbytes); 
+			assert(cur_buf != NULL); 
 			if(is_fsp_fd(aio_fd)){
-				int rc = fs_aio_submit(iocb_ptr); 
+				int rc = fs_aio_submit(iocb_ptr, cur_buf); 
 				if (rc == 0) submitted += 1; 
 			}
 		}
@@ -1358,6 +1361,7 @@ static bool fsp_syscall_handle(long syscall_number,
 		struct io_event *events = args[3]; 
 		struct timespec *timeout = args[4]; 
 		int numEvents = fs_aio_getevents(min_nr, nr, events, timeout); 
+		// DEBUG_PRINT("syscall: io getevent end\n"); 
 		SET_RETURN_VAL(numEvents);
 	}
 
