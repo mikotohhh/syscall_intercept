@@ -1149,22 +1149,17 @@ ssize_t do_fs_alloc_w(int fd, void* buf, size_t count) {
         size_t current_write_size = (count > SIZE) ? SIZE : count;
         void *cur_buf = fs_malloc(current_write_size);
         assert(cur_buf != NULL);
-
         memcpy(cur_buf, tmp_ptr, current_write_size);
         ssize_t ret = fs_allocated_write(fd, cur_buf, current_write_size);
-        if (ret >= 0) {
+        if (ret > 0) {
             tmp_ptr += ret;
             total_written += ret;
         } else {
             fs_free(cur_buf);
             break;
         }
-		fs_free(cur_buf);
-        if(ret < (ssize_t)current_write_size) {
-            break;
-        }
-
         count -= current_write_size;
+		fs_free(cur_buf);
     }
 	assert(total_written == saved); 
     return total_written;
@@ -1437,7 +1432,7 @@ the larger read into some smaller reads
 // 		memcpy((void*)args[1], cur_buf, ret); \
 // 	} \
 // 	fs_free(cur_buf);
-	// DEBUG_PRINT("syscall: read complete\n"); \
+// 	DEBUG_PRINT("syscall: read complete\n"); \
 
 #define DO_FS_ALLOC_R \
     size_t count = args[2]; \
@@ -1448,20 +1443,20 @@ the larger read into some smaller reads
         void *cur_buf = fs_malloc(current_read_size); \
         assert (cur_buf != NULL); \
         ssize_t ret = fs_allocated_read(cur_fd, cur_buf, current_read_size); \
-        if (ret >= 0) { \
+        if (ret > 0) { \
             memcpy(tmp_ptr, cur_buf, ret); \
             tmp_ptr += ret; \
             total += ret; \
         } \
-        if(ret < (ssize_t)current_read_size) { \
-            /* End of file or error in reading, break out of loop */ \
-            break; \
-        } \
+		else{ \ 
+			fs_free(cur_buf); \
+			break; \
+		} \
         count -= current_read_size; \
 		fs_free(cur_buf); \
     } \
     ssize_t ret = total; \
-	// assert(args[2] == ret); \
+	assert(args[2] == ret); \
 
 	/*
 	ext4 lseek support set offset beyond EOF and DiskANN code use this 
@@ -1520,7 +1515,7 @@ the larger read into some smaller reads
         assert (cur_buf != NULL); \
         memcpy(cur_buf, tmp_ptr, current_write_size); \
         ssize_t ret = fs_allocated_write(cur_fd, cur_buf, current_write_size); \
-        if (ret >= 0) { \
+        if (ret > 0) { \
             tmp_ptr += ret; \
             total_written += ret; \
         } else { \
@@ -1528,12 +1523,8 @@ the larger read into some smaller reads
             fs_free(cur_buf); \
             break; \
         } \
-        fs_free(cur_buf); \
-        if(ret < (ssize_t)current_write_size) { \
-            /* Some error during writing, since we expected to write current_write_size but wrote less */ \
-            break; \
-        } \
         count -= current_write_size; \
+		fs_free(cur_buf); \
     } \
     ssize_t ret = total_written; \
 	// assert(args[2] == ret); \ 
