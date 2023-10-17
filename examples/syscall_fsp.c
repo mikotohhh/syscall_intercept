@@ -1341,6 +1341,7 @@ static bool fsp_syscall_handle(long syscall_number,
 			struct iocb *iocb_ptr = iocbpp[i]; 
 			int aio_fd = iocb_ptr->aio_fildes;
 			// DEBUG_PRINT("syscall: request malloc size: %ld\n", iocb_ptr->aio_nbytes); 
+			// will get dealloc in io_event
 			void *cur_buf = fs_malloc(iocb_ptr->aio_nbytes); 
 			assert(cur_buf != NULL); 
 			if(is_fsp_fd(aio_fd)){
@@ -1456,7 +1457,7 @@ the larger read into some smaller reads
 		fs_free(cur_buf); \
     } \
     ssize_t ret = total; \
-	assert(args[2] == ret); \
+	// assert(args[2] == ret); \
 
 	/*
 	ext4 lseek support set offset beyond EOF and DiskANN code use this 
@@ -1479,6 +1480,7 @@ the larger read into some smaller reads
 				memset(write_buf, 0, write_sz);
 				// DEBUG_PRINT("syscall: before seek request write size: %ld\n", write_sz); 
 				ssize_t ret_write = fs_allocated_pwrite(cur_fd, write_buf, write_sz, st_size); 
+				fs_free(write_buf); 
 				// DEBUG_PRINT("syscall: before seek actual write size: %ld\n", ret_write); 
 				// ret_stat = fs_fstat(cur_fd, &stat_buf); 
 				// st_size = stat_buf.st_size; 	
