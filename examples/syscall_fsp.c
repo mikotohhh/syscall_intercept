@@ -342,6 +342,7 @@ append_buffer(const char *data, ssize_t len)
 		syscall_no_intercept(SYS_write, log_fd, buffer, buffer_offset);
 		__atomic_store_n(&buffer_offset, 0, __ATOMIC_SEQ_CST);
 	}
+	syscall_no_intercept(SYS_fsync, log_fd); 
 }
 
 static char *
@@ -1066,7 +1067,7 @@ print_syscall(const struct syscall_desc *desc,
 					args, result);
 
 	*c++ = '\n';
-	// append_buffer(local_buffer, c - local_buffer);
+	append_buffer(local_buffer, c - local_buffer);
 }
 
 static void check_open_flag_fd_type(long open_flags, int8_t *fd_type) {
@@ -1139,9 +1140,35 @@ static void regulate_stat_result(struct stat *stat_buf, bool is_fsp) {
 	}
 }
 
-// write 
-ssize_t do_fs_alloc_w(int fd, void* buf, size_t count) {
-	ssize_t saved = count; 
+/*
+When malloc size > 2M, fs_malloc return null ptr, break
+the larger read & write into some smaller reads
+*/
+static ssize_t do_fs_alloc_r(int fd, void* buf, size_t count){
+	ssize_t total_read = 0; 
+    void* tmp_ptr = buf; 
+
+    while(count > 0) { 
+        size_t current_read_size = (count > SIZE) ? SIZE : count; 
+        void *cur_buf = fs_malloc(current_read_size); 
+        assert (cur_buf != NULL); 
+        ssize_t ret = fs_allocated_read(fd, cur_buf, current_read_size); 
+        if (ret > 0) { 
+            memcpy(tmp_ptr, cur_buf, ret); 
+            tmp_ptr += ret; 
+            total_read += ret; 
+        } 
+		else{ 
+			return -1; 
+			fs_free(cur_buf); 
+		} 
+        count -= current_read_size; 
+		fs_free(cur_buf); 
+    } 
+    return total_read; 
+}
+
+static ssize_t do_fs_alloc_w(int fd, void* buf, size_t count) {
     ssize_t total_written = 0;
 	void* tmp_ptr = buf; 
 
@@ -1151,20 +1178,19 @@ ssize_t do_fs_alloc_w(int fd, void* buf, size_t count) {
         assert(cur_buf != NULL);
         memcpy(cur_buf, tmp_ptr, current_write_size);
         ssize_t ret = fs_allocated_write(fd, cur_buf, current_write_size);
-        if (ret > 0) {
+        if (ret >= 0) {
             tmp_ptr += ret;
             total_written += ret;
         } else {
             fs_free(cur_buf);
-            break;
+			return -1; 
         }
         count -= current_write_size;
 		fs_free(cur_buf);
     }
-	assert(total_written == saved); 
+	// assert(total_written == saved); 
     return total_written;
 }
-
 
 static bool fsp_syscall_handle(long syscall_number,
 		const long args[6],
@@ -1187,7 +1213,7 @@ static bool fsp_syscall_handle(long syscall_number,
 		*result = ret_val;   \
 	} else {                 \
         if (ret_val != -1) errno = -ret_val; \
-		*result = -errno;     \
+		*result = -1;     \
 	}                        \
 	handled = true;
 
@@ -1412,51 +1438,6 @@ static bool fsp_syscall_handle(long syscall_number,
 #endif // RUN_GNU_SORT
 		SET_RETURN_VAL(truncate_length);
 	}
-
-/*
-When malloc size > 2M, fs_malloc return null ptr, break
-the larger read into some smaller reads
-*/
-
-// #define DO_FS_ALLOC_R \
-// 	size_t count = args[2]; \
-// 	ssize_t tmp = 1024 * 1024; \
-// 	void *cur_buf = fs_malloc(tmp); \
-// 	DEBUG_PRINT("syscall: malloc read cur_buf: %d\n", cur_buf == NULL); \
-// 	assert (cur_buf != NULL); \
-// 	DEBUG_PRINT("syscall: enter fs_read\n"); \
-// 	ssize_t ret = fs_allocated_read(cur_fd, cur_buf, tmp); \
-// 	DEBUG_PRINT("syscall: fs_read out\n"); \
-// 	if (ret >= 0) { \
-// 		memcpy((void*)args[1], cur_buf, ret); \
-// 	} \
-// 	fs_free(cur_buf);
-// 	DEBUG_PRINT("syscall: read complete\n"); \
-
-#define DO_FS_ALLOC_R \
-    size_t count = args[2]; \
-    ssize_t total = 0; \
-    void* tmp_ptr = (void*)args[1]; \
-    while(count > 0) { \
-        size_t current_read_size = (count > SIZE) ? SIZE : count; \
-        void *cur_buf = fs_malloc(current_read_size); \
-        assert (cur_buf != NULL); \
-        ssize_t ret = fs_allocated_read(cur_fd, cur_buf, current_read_size); \
-        if (ret > 0) { \
-            memcpy(tmp_ptr, cur_buf, ret); \
-            tmp_ptr += ret; \
-            total += ret; \
-        } \
-		else{ \ 
-			fs_free(cur_buf); \
-			break; \
-		} \
-        count -= current_read_size; \
-		fs_free(cur_buf); \
-    } \
-    ssize_t ret = total; \
-	// assert(args[2] == ret); \
-
 	/*
 	ext4 lseek support set offset beyond EOF and DiskANN code use this 
 	feature, which will cause ApparateFS return err. So I first check size 
@@ -1476,7 +1457,6 @@ the larger read into some smaller reads
 				void *write_buf = fs_malloc(write_sz);
 				assert (write_buf != NULL);
 				memset(write_buf, 0, write_sz);
-				// DEBUG_PRINT("syscall: before seek request write size: %ld\n", write_sz); 
 				ssize_t ret_write = fs_allocated_pwrite(cur_fd, write_buf, write_sz, st_size); 
 				fs_free(write_buf); 
 				// DEBUG_PRINT("syscall: before seek actual write size: %ld\n", ret_write); 
@@ -1489,50 +1469,11 @@ the larger read into some smaller reads
 			SET_RETURN_VAL(ret);
 		}
 	}
-
-/*
-When malloc size > 2M, fs_malloc return null ptr, break
-the larger read into some smaller reads
-*/
-
-// #define DO_FS_ALLOC_W \
-// 	size_t count = args[2]; \
-// 	fprintf(stderr, "total write request: %d\n", count); \
-// 	void *cur_buf = fs_malloc(count); \
-// 	assert (cur_buf != NULL); \
-// 	memcpy(cur_buf, (void*)args[1], count); \
-// 	ssize_t ret = fs_allocated_write(cur_fd, cur_buf, count); \
-// 	fprintf(stderr, "return write size: %d\n", ret); \
-// 	fs_free(cur_buf);
-
-#define DO_FS_ALLOC_W \
-    size_t count = args[2]; \
-    ssize_t  total_written = 0; \
-    void* tmp_ptr = (void*)args[1]; \
-    while(count > 0) {; \
-        size_t current_write_size = (count > SIZE) ? SIZE : count; \
-        void *cur_buf = fs_malloc(current_write_size); \
-        assert (cur_buf != NULL); \
-        memcpy(cur_buf, tmp_ptr, current_write_size); \
-        ssize_t ret = fs_allocated_write(cur_fd, cur_buf, current_write_size); \
-        if (ret > 0) { \
-            tmp_ptr += ret; \
-            total_written += ret; \
-        } else { \
-            /* Error in writing, break out of loop */ \
-            fs_free(cur_buf); \
-            break; \
-        } \
-        count -= current_write_size; \
-		fs_free(cur_buf); \
-    } \
-    ssize_t ret = total_written; \
-	// assert(args[2] == ret); \ 
-
-
 	if (syscall_number == SYS_read) {
 		if (is_fsp_fd(cur_fd)) {
-			DO_FS_ALLOC_R
+			void *buf = args[1]; 
+			ssize_t read_sz = args[2]; 
+			ssize_t ret = do_fs_alloc_r(cur_fd, buf, read_sz); 
             if (ret <= 0) {
                 // fprintf(stderr, "alloc_read fd%d ret:%ld errno:%d\n", cur_fd, ret, errno);
                 // errno = -ret;
@@ -1558,7 +1499,9 @@ the larger read into some smaller reads
 		}
 #endif // RUN_GNU_SORT
 		if (is_fsp_fd(cur_fd)) {
-			DO_FS_ALLOC_W
+			void *buf = args[1]; 
+			ssize_t write_sz = args[2]; 
+			ssize_t ret = do_fs_alloc_w(cur_fd, buf, write_sz); 
             if (ret <= 0) {
                 // fprintf(stderr, "alloc_write fd%d ret:%ld errno:%d\n", cur_fd, ret, errno);
                 // errno = -ret;
@@ -1571,17 +1514,24 @@ the larger read into some smaller reads
 		if (is_fsp_fd(cur_fd)){
 			struct iovec *iov = args[1]; 
 			int io_event = args[2]; 
-			ssize_t written = 0; 
+			ssize_t write_sz = 0; 
 			for (int i = 0; i < io_event; i++){
-				written += do_fs_alloc_w(cur_fd, iov[i].iov_base, iov[i].iov_len); 
+				write_sz += iov[i].iov_len; 
 			}
+			char *buf = (char*) malloc(write_sz); 
+			assert(buf != NULL); 
+
+			ssize_t offset = 0;
+			for (int i = 0; i < io_event; i++) {
+        		memcpy(buf + offset, iov[i].iov_base, iov[i].iov_len);
+        		offset += iov[i].iov_len;
+    		}
+			ssize_t written = do_fs_alloc_w(cur_fd, buf, write_sz); 
 			SET_RETURN_VAL(written); 
+			free(buf); 
 		}
 	}
-
-#undef DO_FS_ALLOC_R
-#undef DO_FS_ALLOC_W
-
+	
 	if (syscall_number == SYS_close) {
 		if (is_fsp_fd(cur_fd)) {
 #ifdef RUN_GNU_SORT
@@ -1677,7 +1627,7 @@ hook(long syscall_number,
 		get_syscall_desc(syscall_number, args);
 
 	if (desc != NULL && desc->return_type == rnoreturn) {
-		print_syscall(desc, syscall_number, args, 0);
+		// print_syscall(desc, syscall_number, args, 0);
 		if (syscall_number == SYS_exit_group) {
 			char local_buffer[0x30];
 			sprintf(local_buffer, "Time: %lu ns\n", NowNanos() - g_fsp_timer);
@@ -1686,6 +1636,8 @@ hook(long syscall_number,
 		}
 	}
 	int handled = fsp_syscall_handle(syscall_number,  args, result);
+	// print_syscall(desc, syscall_number, args, 0);
+
 	if (!handled) {
 		*result = syscall_no_intercept(syscall_number,
 					arg0, arg1, arg2, arg3, arg4, arg5);
@@ -1698,6 +1650,9 @@ hook(long syscall_number,
 				g_syncall_counter, syscall_number);
 			fs_syncall();
 		}
+		char local_buffer[0x30] = {0};
+		int len = sprintf(local_buffer, "(%ld) Handled syscall: %ld\n", *result, syscall_number);
+		syscall_no_intercept(SYS_write, log_fd, local_buffer, len);
 	}
     if (syscall_number == SYS_exit || syscall_number == SYS_exit_group) {
         int ret = fs_exit();
