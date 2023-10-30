@@ -1015,7 +1015,7 @@ print_known_syscall(char *dst, const struct syscall_desc *desc,
 			dst = print_atfd(dst, args[i]);
 			break;
 		case arg_cstr:
-			dst = print_hex(dst, args[i]);
+			// dst = print_hex(dst, args[i]);
 			dst = print_cstr_escaped(dst, (const char *)(args[i]));
 			break;
 		case arg_open_flags:
@@ -1025,7 +1025,7 @@ print_known_syscall(char *dst, const struct syscall_desc *desc,
 			dst = print_mode_t(dst, result);
 			break;
 		default:
-			dst = print_hex(dst, args[i]);
+			dst = print_runsigned(dst, args[i]);
 			break;
 		}
 	}
@@ -1068,6 +1068,24 @@ print_syscall(const struct syscall_desc *desc,
 
 	*c++ = '\n';
 	append_buffer(local_buffer, c - local_buffer);
+}
+
+static off_t
+print_syscall_file(const struct syscall_desc *desc,
+		long syscall_number, const long args[6], long result, int log_fd)
+{
+	char local_buffer[0x300];
+	char *c;
+
+	if (desc != NULL)
+		c = print_known_syscall(local_buffer, desc, args, result);
+	else
+		c = print_unknown_syscall(local_buffer, syscall_number,
+					args, result);
+
+	*c++ = '\n';
+	syscall_no_intercept(SYS_write, log_fd, local_buffer, c - local_buffer);
+	return (c - local_buffer); 
 }
 
 static void check_open_flag_fd_type(long open_flags, int8_t *fd_type) {
@@ -1146,21 +1164,20 @@ the larger read & write into some smaller reads
 */
 static ssize_t do_fs_alloc_r(int fd, void* buf, size_t count){
 	ssize_t total_read = 0; 
-    void* tmp_ptr = buf; 
-
+    char *tmp_ptr = buf; 
     while(count > 0) { 
         size_t current_read_size = (count > SIZE) ? SIZE : count; 
         void *cur_buf = fs_malloc(current_read_size); 
         assert (cur_buf != NULL); 
         ssize_t ret = fs_allocated_read(fd, cur_buf, current_read_size); 
-        if (ret > 0) { 
+        if (ret >= 0) { 
             memcpy(tmp_ptr, cur_buf, ret); 
             tmp_ptr += ret; 
             total_read += ret; 
         } 
 		else{ 
-			return -1; 
 			fs_free(cur_buf); 
+			return ret; 
 		} 
         count -= current_read_size; 
 		fs_free(cur_buf); 
@@ -1170,7 +1187,7 @@ static ssize_t do_fs_alloc_r(int fd, void* buf, size_t count){
 
 static ssize_t do_fs_alloc_w(int fd, void* buf, size_t count) {
     ssize_t total_written = 0;
-	void* tmp_ptr = buf; 
+	char *tmp_ptr = buf; 
 
     while(count > 0) {
         size_t current_write_size = (count > SIZE) ? SIZE : count;
@@ -1183,12 +1200,11 @@ static ssize_t do_fs_alloc_w(int fd, void* buf, size_t count) {
             total_written += ret;
         } else {
             fs_free(cur_buf);
-			return -1; 
+			return ret; 
         }
         count -= current_write_size;
 		fs_free(cur_buf);
     }
-	// assert(total_written == saved); 
     return total_written;
 }
 
@@ -1213,7 +1229,7 @@ static bool fsp_syscall_handle(long syscall_number,
 		*result = ret_val;   \
 	} else {                 \
         if (ret_val != -1) errno = -ret_val; \
-		*result = -1;     \
+		*result = -errno;     \
 	}                        \
 	handled = true;
 
@@ -1366,7 +1382,6 @@ static bool fsp_syscall_handle(long syscall_number,
 		for (int i = 0; i < nr; i++){
 			struct iocb *iocb_ptr = iocbpp[i]; 
 			int aio_fd = iocb_ptr->aio_fildes;
-			// DEBUG_PRINT("syscall: request malloc size: %ld\n", iocb_ptr->aio_nbytes); 
 			// will get dealloc in io_event
 			if(is_fsp_fd(aio_fd)){
 				int rc = fs_aio_submit(iocb_ptr); 
@@ -1378,10 +1393,9 @@ static bool fsp_syscall_handle(long syscall_number,
 	if (syscall_number == SYS_io_getevents){
 		long min_nr = args[1];
 		long nr = args[2]; 
-		struct io_event *events = args[3]; 
-		struct timespec *timeout = args[4]; 
+		struct io_event *events = (struct io_event *)args[3]; 
+		struct timespec *timeout = (struct timespec *)args[4]; 
 		int numEvents = fs_aio_getevents(min_nr, nr, events, timeout); 
-		// DEBUG_PRINT("syscall: io getevent end\n"); 
 		SET_RETURN_VAL(numEvents);
 	}
 
@@ -1446,12 +1460,10 @@ static bool fsp_syscall_handle(long syscall_number,
 	*/
 	if (syscall_number == SYS_lseek) {
 		if (is_fsp_fd(cur_fd)) {
-			// DEBUG_PRINT("syscall: receive lseek()\n"); 
 			struct stat stat_buf;
 			int ret_stat = fs_fstat(cur_fd, &stat_buf); 
+			if(ret_stat < 0) goto ret;
 			ssize_t st_size = stat_buf.st_size; 	
-			// DEBUG_PRINT("syscall: seek offset: %ld\n", args[1]); 
-			// DEBUG_PRINT("syscall: actual file size: %ld\n", st_size); 
 			if(st_size < args[1]){
 				ssize_t write_sz = args[1] - st_size; 
 				void *write_buf = fs_malloc(write_sz);
@@ -1459,19 +1471,16 @@ static bool fsp_syscall_handle(long syscall_number,
 				memset(write_buf, 0, write_sz);
 				ssize_t ret_write = fs_allocated_pwrite(cur_fd, write_buf, write_sz, st_size); 
 				fs_free(write_buf); 
-				// DEBUG_PRINT("syscall: before seek actual write size: %ld\n", ret_write); 
-				// ret_stat = fs_fstat(cur_fd, &stat_buf); 
-				// st_size = stat_buf.st_size; 	
-				// DEBUG_PRINT("syscall: after enlarge file size: %ld\n", st_size);
+				if(ret_write < 0) goto ret; 
 			}
-
 			int ret = fs_lseek(cur_fd, args[1], args[2]);
+		ret:
 			SET_RETURN_VAL(ret);
 		}
 	}
 	if (syscall_number == SYS_read) {
 		if (is_fsp_fd(cur_fd)) {
-			void *buf = args[1]; 
+			void *buf = (void*)args[1]; 
 			ssize_t read_sz = args[2]; 
 			ssize_t ret = do_fs_alloc_r(cur_fd, buf, read_sz); 
             if (ret <= 0) {
@@ -1499,7 +1508,7 @@ static bool fsp_syscall_handle(long syscall_number,
 		}
 #endif // RUN_GNU_SORT
 		if (is_fsp_fd(cur_fd)) {
-			void *buf = args[1]; 
+			void *buf = (void*)args[1]; 
 			ssize_t write_sz = args[2]; 
 			ssize_t ret = do_fs_alloc_w(cur_fd, buf, write_sz); 
             if (ret <= 0) {
@@ -1512,7 +1521,7 @@ static bool fsp_syscall_handle(long syscall_number,
 
 	if (syscall_number == SYS_writev){
 		if (is_fsp_fd(cur_fd)){
-			struct iovec *iov = args[1]; 
+			struct iovec *iov = (struct iovec*)args[1]; 
 			int io_event = args[2]; 
 			ssize_t write_sz = 0; 
 			for (int i = 0; i < io_event; i++){
@@ -1630,17 +1639,24 @@ hook(long syscall_number,
 		// print_syscall(desc, syscall_number, args, 0);
 		if (syscall_number == SYS_exit_group) {
 			char local_buffer[0x30];
-			sprintf(local_buffer, "Time: %lu ns\n", NowNanos() - g_fsp_timer);
+			sprintf(local_buffer, "INFO: Time: %lu ns\n\n", NowNanos() - g_fsp_timer);
 			append_buffer(local_buffer, strlen(local_buffer));
 			syscall_no_intercept(SYS_write, log_fd, buffer, buffer_offset);
 		}
 	}
+
+	off_t tmp_sz = print_syscall_file(desc, syscall_number, args, -99999, log_fd);
+
 	int handled = fsp_syscall_handle(syscall_number,  args, result);
-	// print_syscall(desc, syscall_number, args, 0);
+
+	struct stat statbuf; 
+	syscall_no_intercept(SYS_fstat, log_fd, &statbuf); 
+	off_t new_size = statbuf.st_size - tmp_sz; 
+	syscall_no_intercept(SYS_ftruncate, log_fd, new_size);
 
 	if (!handled) {
 		*result = syscall_no_intercept(syscall_number,
-					arg0, arg1, arg2, arg3, arg4, arg5);
+					arg0, arg1, arg2, arg3, arg4, arg5); 
 	} else {
 		g_syncall_counter++;
 		// fprintf(stderr, "syscall_seq_no:%d syscall_number:%d arg0:%ld\n", 
@@ -1650,9 +1666,10 @@ hook(long syscall_number,
 				g_syncall_counter, syscall_number);
 			fs_syncall();
 		}
-		char local_buffer[0x30] = {0};
-		int len = sprintf(local_buffer, "(%ld) Handled syscall: %ld\n", *result, syscall_number);
-		syscall_no_intercept(SYS_write, log_fd, local_buffer, len);
+		print_syscall_file(desc, syscall_number, args, *result, log_fd);
+		// char local_buffer[0x30] = {0};
+		// int len = sprintf(local_buffer, "(%ld) Handled syscall: %ld\n", *result, syscall_number);
+		// syscall_no_intercept(SYS_write, log_fd, local_buffer, len);
 	}
     if (syscall_number == SYS_exit || syscall_number == SYS_exit_group) {
         int ret = fs_exit();
