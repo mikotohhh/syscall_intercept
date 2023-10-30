@@ -1645,8 +1645,9 @@ hook(long syscall_number,
 		}
 	}
 
+	// save syscall temporarily, fruncate the file after uFS process it
 	off_t tmp_sz = print_syscall_file(desc, syscall_number, args, -99999, log_fd);
-
+ 
 	int handled = fsp_syscall_handle(syscall_number,  args, result);
 
 	struct stat statbuf; 
