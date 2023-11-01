@@ -53,6 +53,7 @@
 #include <time.h>
 
 #include "fsapi.h"
+#include <linux/aio_abi.h> 
 
 
 #define FSP_SHIM_DBG_FLAG 0
@@ -75,6 +76,14 @@ int log_fd;
 
 static char buffer[0x2000000];
 static size_t buffer_offset;
+
+#ifdef DEBUG
+#define DEBUG_PRINT(...) do{ fprintf( stderr, __VA_ARGS__ ); } while( false )
+#else
+#define DEBUG_PRINT(...) do{ } while ( false )
+#endif
+
+#define SIZE 1024 * 1024 / 4
 
 #define FS_SHM_KEY_BASE 20190301
 #define FS_MAX_NUM_WORKER 20
@@ -197,7 +206,11 @@ static int get_fsp_path_mode_gt(const char *path, mode_t *mode) {
 }
 
 static inline int check_if_fsp_path(const char *path) {
-  return strncmp(path, fsp_dir_prefix, FSP_PATH_PREFIX_LEN) == 0;
+  	// fprintf(stderr, "filename: %s\n", path); 
+	// fprintf(stderr, "prefix: %s\n", fsp_dir_prefix); 
+	int rc = strncmp(path, fsp_dir_prefix, FSP_PATH_PREFIX_LEN) == 0;
+	// fprintf(stderr, "compare: %s\n", fsp_dir_prefix); 
+	return rc; 
 }
 
 #define FSP_SORT_FNAME_IN_IDX (0)
@@ -329,6 +342,7 @@ append_buffer(const char *data, ssize_t len)
 		syscall_no_intercept(SYS_write, log_fd, buffer, buffer_offset);
 		__atomic_store_n(&buffer_offset, 0, __ATOMIC_SEQ_CST);
 	}
+	syscall_no_intercept(SYS_fsync, log_fd); 
 }
 
 static char *
@@ -1001,7 +1015,7 @@ print_known_syscall(char *dst, const struct syscall_desc *desc,
 			dst = print_atfd(dst, args[i]);
 			break;
 		case arg_cstr:
-			dst = print_hex(dst, args[i]);
+			// dst = print_hex(dst, args[i]);
 			dst = print_cstr_escaped(dst, (const char *)(args[i]));
 			break;
 		case arg_open_flags:
@@ -1011,7 +1025,7 @@ print_known_syscall(char *dst, const struct syscall_desc *desc,
 			dst = print_mode_t(dst, result);
 			break;
 		default:
-			dst = print_hex(dst, args[i]);
+			dst = print_runsigned(dst, args[i]);
 			break;
 		}
 	}
@@ -1053,7 +1067,25 @@ print_syscall(const struct syscall_desc *desc,
 					args, result);
 
 	*c++ = '\n';
-	// append_buffer(local_buffer, c - local_buffer);
+	append_buffer(local_buffer, c - local_buffer);
+}
+
+static off_t
+print_syscall_file(const struct syscall_desc *desc,
+		long syscall_number, const long args[6], long result, int log_fd)
+{
+	char local_buffer[0x300];
+	char *c;
+
+	if (desc != NULL)
+		c = print_known_syscall(local_buffer, desc, args, result);
+	else
+		c = print_unknown_syscall(local_buffer, syscall_number,
+					args, result);
+
+	*c++ = '\n';
+	syscall_no_intercept(SYS_write, log_fd, local_buffer, c - local_buffer);
+	return (c - local_buffer); 
 }
 
 static void check_open_flag_fd_type(long open_flags, int8_t *fd_type) {
@@ -1126,10 +1158,62 @@ static void regulate_stat_result(struct stat *stat_buf, bool is_fsp) {
 	}
 }
 
+/*
+When malloc size > 2M, fs_malloc return null ptr, break
+the larger read & write into some smaller reads
+*/
+static ssize_t do_fs_alloc_r(int fd, void* buf, size_t count){
+	ssize_t total_read = 0; 
+    char *tmp_ptr = buf; 
+    while(count > 0) { 
+        size_t current_read_size = (count > SIZE) ? SIZE : count; 
+        void *cur_buf = fs_malloc(current_read_size); 
+        assert (cur_buf != NULL); 
+        ssize_t ret = fs_allocated_read(fd, cur_buf, current_read_size); 
+        if (ret >= 0) { 
+            memcpy(tmp_ptr, cur_buf, ret); 
+            tmp_ptr += ret; 
+            total_read += ret; 
+        } 
+		else{ 
+			fs_free(cur_buf); 
+			return ret; 
+		} 
+        count -= current_read_size; 
+		fs_free(cur_buf); 
+    } 
+    return total_read; 
+}
+
+static ssize_t do_fs_alloc_w(int fd, void* buf, size_t count) {
+    ssize_t total_written = 0;
+	char *tmp_ptr = buf; 
+
+    while(count > 0) {
+        size_t current_write_size = (count > SIZE) ? SIZE : count;
+        void *cur_buf = fs_malloc(current_write_size);
+        assert(cur_buf != NULL);
+        memcpy(cur_buf, tmp_ptr, current_write_size);
+        ssize_t ret = fs_allocated_write(fd, cur_buf, current_write_size);
+        if (ret >= 0) {
+            tmp_ptr += ret;
+            total_written += ret;
+        } else {
+            fs_free(cur_buf);
+			return ret; 
+        }
+        count -= current_write_size;
+		fs_free(cur_buf);
+    }
+    return total_written;
+}
+
 static bool fsp_syscall_handle(long syscall_number,
 		const long args[6],
 		long *result)
 {
+	// assert(args[2] != 8); 
+	
 #ifdef SINGLE_OP_TIMER
 	uint64_t single = 0;
 	if ((g_fsp_intercepted + 1) % 1 == 0) {
@@ -1137,6 +1221,7 @@ static bool fsp_syscall_handle(long syscall_number,
 	}
 #endif
 
+	// fprintf(stderr, "syscall num: %d\n", syscall_number);
 
 // We want these two updates to be always paired
 #define SET_RETURN_VAL(ret_val) \
@@ -1174,13 +1259,15 @@ static bool fsp_syscall_handle(long syscall_number,
 		errno = 0;
 		check_open_flag_fd_type(args[open_flag_pos], &cur_fd_type);
 		if (check_if_fsp_path(cur_path)) {
+				// DEBUG_PRINT("syscall: open file: %s\n", cur_path); 
                 //   fprintf(stderr,
                 //       "openat cur_path:%s flag:%d is_fsp_path:%d errno:%d\n",
                 //       cur_path, (int)args[open_flag_pos],
                 //       check_if_fsp_path(cur_path), errno);
-                  cur_path = TO_NEW_PATH(cur_path);
+				  cur_path = TO_NEW_PATH(cur_path);
                   int fd = fd = fs_open(cur_path, (int)args[open_flag_pos],
                                         (mode_t)args[open_mode_pos]);
+				//   fprintf(stderr, "fd: %d\n", fd); 
                   if (fd >= 0) {
                     int idx = add_fsp_fd(fd, (int)args[open_flag_pos]);
                     assert(idx >= 0);
@@ -1285,6 +1372,33 @@ static bool fsp_syscall_handle(long syscall_number,
 		}
 	}
 
+	if (syscall_number == SYS_io_setup){
+		SET_RETURN_VAL(0); 
+	}
+	if (syscall_number == SYS_io_submit){
+		int submitted = 0; 
+		long nr = args[1]; 
+		struct iocb **iocbpp = (struct iocb **) args[2]; 
+		for (int i = 0; i < nr; i++){
+			struct iocb *iocb_ptr = iocbpp[i]; 
+			int aio_fd = iocb_ptr->aio_fildes;
+			// will get dealloc in io_event
+			if(is_fsp_fd(aio_fd)){
+				int rc = fs_aio_submit(iocb_ptr); 
+				if (rc == 0) submitted += 1; 
+			}
+		}
+		SET_RETURN_VAL(submitted); 
+	}
+	if (syscall_number == SYS_io_getevents){
+		long min_nr = args[1];
+		long nr = args[2]; 
+		struct io_event *events = (struct io_event *)args[3]; 
+		struct timespec *timeout = (struct timespec *)args[4]; 
+		int numEvents = fs_aio_getevents(min_nr, nr, events, timeout); 
+		SET_RETURN_VAL(numEvents);
+	}
+
     if (syscall_number == SYS_utime) {
 		if (check_if_fsp_path(cur_path)) {
 			cur_path = TO_NEW_PATH(cur_path);
@@ -1338,35 +1452,37 @@ static bool fsp_syscall_handle(long syscall_number,
 #endif // RUN_GNU_SORT
 		SET_RETURN_VAL(truncate_length);
 	}
-
-#define DO_FS_ALLOC_R \
-	size_t count = args[2]; \
-	void *cur_buf = fs_malloc(count); \
-	assert (cur_buf != NULL); \
-	ssize_t ret = fs_allocated_read(cur_fd, cur_buf, count); \
-	if (ret >= 0) { \
-		memcpy((void*)args[1], cur_buf, ret); \
-	} \
-	fs_free(cur_buf);
-
+	/*
+	ext4 lseek support set offset beyond EOF and DiskANN code use this 
+	feature, which will cause ApparateFS return err. So I first check size 
+	of the file, if size is smaller than offset than first write some
+	zero bytes up to the offset
+	*/
 	if (syscall_number == SYS_lseek) {
 		if (is_fsp_fd(cur_fd)) {
+			struct stat stat_buf;
+			int ret_stat = fs_fstat(cur_fd, &stat_buf); 
+			if(ret_stat < 0) goto ret;
+			ssize_t st_size = stat_buf.st_size; 	
+			if(st_size < args[1]){
+				ssize_t write_sz = args[1] - st_size; 
+				void *write_buf = fs_malloc(write_sz);
+				assert (write_buf != NULL);
+				memset(write_buf, 0, write_sz);
+				ssize_t ret_write = fs_allocated_pwrite(cur_fd, write_buf, write_sz, st_size); 
+				fs_free(write_buf); 
+				if(ret_write < 0) goto ret; 
+			}
 			int ret = fs_lseek(cur_fd, args[1], args[2]);
+		ret:
 			SET_RETURN_VAL(ret);
 		}
 	}
-
-#define DO_FS_ALLOC_W \
-	size_t count = args[2]; \
-	void *cur_buf = fs_malloc(count); \
-	assert (cur_buf != NULL); \
-	memcpy(cur_buf, (void*)args[1], count); \
-	ssize_t ret = fs_allocated_write(cur_fd, cur_buf, count); \
-	fs_free(cur_buf);
-
 	if (syscall_number == SYS_read) {
 		if (is_fsp_fd(cur_fd)) {
-			DO_FS_ALLOC_R
+			void *buf = (void*)args[1]; 
+			ssize_t read_sz = args[2]; 
+			ssize_t ret = do_fs_alloc_r(cur_fd, buf, read_sz); 
             if (ret <= 0) {
                 // fprintf(stderr, "alloc_read fd%d ret:%ld errno:%d\n", cur_fd, ret, errno);
                 // errno = -ret;
@@ -1374,14 +1490,27 @@ static bool fsp_syscall_handle(long syscall_number,
 			SET_RETURN_VAL(ret);
 		}
 	}
+	// if (syscall_number == SYS_pread64){
+	// 	if(is_fsp_fd(cur_fd)){
+	// 		ssize_t pread_ret = fs_pread(args[0], args[1], args[2], args[3]); 
+	// 		if (pread_ret <= 0) {
+    //             // fprintf(stderr, "alloc_read fd%d ret:%ld errno:%d\n", cur_fd, ret, errno);
+    //             // errno = -ret;
+    //         }
+	// 		SET_RETURN_VAL(pread_ret);
+	// 	}
+	// }
 	if (syscall_number == SYS_write) {
+		
 #ifdef RUN_GNU_SORT
 		if (check_if_fsp_sort_outfd_dup_target(cur_fd)) {
 			cur_fd = g_fsp_sort_ctx.output_fd;
 		}
 #endif // RUN_GNU_SORT
 		if (is_fsp_fd(cur_fd)) {
-			DO_FS_ALLOC_W
+			void *buf = (void*)args[1]; 
+			ssize_t write_sz = args[2]; 
+			ssize_t ret = do_fs_alloc_w(cur_fd, buf, write_sz); 
             if (ret <= 0) {
                 // fprintf(stderr, "alloc_write fd%d ret:%ld errno:%d\n", cur_fd, ret, errno);
                 // errno = -ret;
@@ -1390,9 +1519,28 @@ static bool fsp_syscall_handle(long syscall_number,
 		}
 	}
 
-#undef DO_FS_ALLOC_R
-#undef DO_FS_ALLOC_W
+	if (syscall_number == SYS_writev){
+		if (is_fsp_fd(cur_fd)){
+			struct iovec *iov = (struct iovec*)args[1]; 
+			int io_event = args[2]; 
+			ssize_t write_sz = 0; 
+			for (int i = 0; i < io_event; i++){
+				write_sz += iov[i].iov_len; 
+			}
+			char *buf = (char*) malloc(write_sz); 
+			assert(buf != NULL); 
 
+			ssize_t offset = 0;
+			for (int i = 0; i < io_event; i++) {
+        		memcpy(buf + offset, iov[i].iov_base, iov[i].iov_len);
+        		offset += iov[i].iov_len;
+    		}
+			ssize_t written = do_fs_alloc_w(cur_fd, buf, write_sz); 
+			SET_RETURN_VAL(written); 
+			free(buf); 
+		}
+	}
+	
 	if (syscall_number == SYS_close) {
 		if (is_fsp_fd(cur_fd)) {
 #ifdef RUN_GNU_SORT
@@ -1488,19 +1636,28 @@ hook(long syscall_number,
 		get_syscall_desc(syscall_number, args);
 
 	if (desc != NULL && desc->return_type == rnoreturn) {
-		print_syscall(desc, syscall_number, args, 0);
+		// print_syscall(desc, syscall_number, args, 0);
 		if (syscall_number == SYS_exit_group) {
 			char local_buffer[0x30];
-			sprintf(local_buffer, "Time: %lu ns\n", NowNanos() - g_fsp_timer);
+			sprintf(local_buffer, "INFO: Time: %lu ns\n\n", NowNanos() - g_fsp_timer);
 			append_buffer(local_buffer, strlen(local_buffer));
 			syscall_no_intercept(SYS_write, log_fd, buffer, buffer_offset);
 		}
 	}
 
+	// save syscall temporarily, fruncate the file after uFS process it
+	off_t tmp_sz = print_syscall_file(desc, syscall_number, args, -99999, log_fd);
+ 
 	int handled = fsp_syscall_handle(syscall_number,  args, result);
+
+	struct stat statbuf; 
+	syscall_no_intercept(SYS_fstat, log_fd, &statbuf); 
+	off_t new_size = statbuf.st_size - tmp_sz; 
+	syscall_no_intercept(SYS_ftruncate, log_fd, new_size);
+
 	if (!handled) {
 		*result = syscall_no_intercept(syscall_number,
-					arg0, arg1, arg2, arg3, arg4, arg5);
+					arg0, arg1, arg2, arg3, arg4, arg5); 
 	} else {
 		g_syncall_counter++;
 		// fprintf(stderr, "syscall_seq_no:%d syscall_number:%d arg0:%ld\n", 
@@ -1510,6 +1667,10 @@ hook(long syscall_number,
 				g_syncall_counter, syscall_number);
 			fs_syncall();
 		}
+		print_syscall_file(desc, syscall_number, args, *result, log_fd);
+		// char local_buffer[0x30] = {0};
+		// int len = sprintf(local_buffer, "(%ld) Handled syscall: %ld\n", *result, syscall_number);
+		// syscall_no_intercept(SYS_write, log_fd, local_buffer, len);
 	}
     if (syscall_number == SYS_exit || syscall_number == SYS_exit_group) {
         int ret = fs_exit();
@@ -1525,7 +1686,6 @@ hook(long syscall_number,
     }
 
 	// print_syscall(desc, syscall_number, args, *result);
-
 	return 0;
 }
 
@@ -1551,7 +1711,7 @@ start(void)
 		syscall_no_intercept(SYS_exit_group, 3);
 
 	log_fd = (int)syscall_no_intercept(SYS_open,
-			path, O_CREAT | O_TRUNC | O_RDWR, (mode_t)0777);
+			path, O_CREAT | O_APPEND | O_RDWR, (mode_t)0777);
 
 	if (log_fd < 0)
 		syscall_no_intercept(SYS_exit_group, 4);
