@@ -1462,7 +1462,7 @@ static bool fsp_syscall_handle(long syscall_number,
 		if (is_fsp_fd(cur_fd)) {
 			struct stat stat_buf;
 			int ret_stat = fs_fstat(cur_fd, &stat_buf); 
-			if(ret_stat < 0) goto ret;
+			// if(ret_stat < 0) goto ret;
 			ssize_t st_size = stat_buf.st_size; 	
 			if(st_size < args[1]){
 				ssize_t write_sz = args[1] - st_size; 
@@ -1471,7 +1471,7 @@ static bool fsp_syscall_handle(long syscall_number,
 				memset(write_buf, 0, write_sz);
 				ssize_t ret_write = fs_allocated_pwrite(cur_fd, write_buf, write_sz, st_size); 
 				fs_free(write_buf); 
-				if(ret_write < 0) goto ret; 
+				// if(ret_write < 0) goto ret; 
 			}
 			int ret = fs_lseek(cur_fd, args[1], args[2]);
 		ret:
@@ -1659,15 +1659,18 @@ hook(long syscall_number,
 		*result = syscall_no_intercept(syscall_number,
 					arg0, arg1, arg2, arg3, arg4, arg5); 
 	} else {
+		print_syscall_file(desc, syscall_number, args, *result, log_fd);
 		g_syncall_counter++;
 		// fprintf(stderr, "syscall_seq_no:%d syscall_number:%d arg0:%ld\n", 
-	    //	 g_syncall_counter, syscall_number, arg0);
+	    // 	 g_syncall_counter, syscall_number, arg0);
 		if (g_syncall_counter == g_syncall_seq_no && g_syncall_seq_no > 0) {
+			char local_buffer[0x30] = {0};
 			fprintf(stderr, "SYNCALL:syncall_seq_no:%d syscall_number:%ld\n",
 				g_syncall_counter, syscall_number);
+			int len = sprintf(local_buffer, "INFO: syncall_seq_no:%d syscall_number:%ld\n", g_syncall_counter, syscall_number);
+			syscall_no_intercept(SYS_write, log_fd, local_buffer, len);
 			fs_syncall();
 		}
-		print_syscall_file(desc, syscall_number, args, *result, log_fd);
 		// char local_buffer[0x30] = {0};
 		// int len = sprintf(local_buffer, "(%ld) Handled syscall: %ld\n", *result, syscall_number);
 		// syscall_no_intercept(SYS_write, log_fd, local_buffer, len);
